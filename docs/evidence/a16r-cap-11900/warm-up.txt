@@ -1,0 +1,401 @@
+We need answer likely code only with brief explanation maybe. Need implement Python module. Need carefully satisfy requirements. Need use exact integers (bool invalid). Values from iterable arbitrary maybe tuples or malformed. Need validate every pair. Consume iterable once. Discard empty. Sort merge overlapping/touching. Return list tuples. Never mutate input or items. limit exact nonnegative int, bool invalid. Every end <= limit. If endpoint invalid? start/end exact integers bool invalid. 0 <= start <= end. For limit: if supplied, must be exact nonnegative integer. bool invalid. If limit invalid raise ValueError. Also every end <= limit. What about start maybe > limit? Since end <= limit and start<=end, automatically start<=limit. If end > limit ValueError. Input malformed pairs: Each item is (start,end) pair. Could be tuple length not 2, or not iterable? We need decide. Validation every pair. If item is list of two? "Each input item is a (start, end) pair" and malformed pairs raise ValueError. Could allow tuple? Need maybe accept any sequence of length 2? But "pair" likely tuple. Need handle malformed robustly. We can unpack item into start,end; if item not iterable or length != 2 raises ValueError. But strings length 2? Could unpack characters then int check. Fine.
+
+Need "Endpoints must be exact integers (bool invalid), with 0 <= start <= end." If start/end are int subclass? bool is subclass. "exact integers" means type(x) is int, not bool. Or isinstance int and not bool? Exact may mean type int. Should reject bool, float. Could accept int subclasses? "exact integers" maybe type(x) is int. We'll use type(x) is int. For limit, type(limit) is int and not bool implicitly type bool != int. If None allowed. If supplied, limit must exact nonnegative integer. If limit=0, all ranges end <=0, start<=end, discard empty? Note range (0,0) empty discarded. If any end>0 raise. Need check limit before processing? Could validate each pair and limit. Need maybe if limit invalid raise before consuming? Consume arbitrary iterable once. Need consume once. If limit invalid, can raise before consuming? Requirement "Consume arbitrary iterable once, validate every pair..." If limit supplied invalid, likely raise ValueError. Whether consume not important? "Consume arbitrary iterable once" means iterate once. Could validate limit before loop. If limit invalid and iterable has side effects? It may never consume. But okay? They might expect invalid limit raises even with generator. We'll validate limit before iteration. But "every end <= limit" if limit invalid. Fine.
+
+Need ensure input preservation: not mutate input iterable? We consume. Items might be tuples. We don't mutate. We create normalized list? Need discard empty. We can return new list of tuples. Values maybe tuples? If input item tuple, output newly constructed. Use `normalized: list[tuple[int,int]] = []`. For each item, validate. If empty start==end discard. Merge sorted.
+
+Implementation details:
+
+```
+from typing import Iterable, Optional, Tuple
+
+def coalesce_ranges(ranges: Iterable[Tuple[int, int]], *, limit: Optional[int] = None) -> list[tuple[int,int]]:
+    if limit is not None:
+        if type(limit) is not int or limit < 0:
+            raise ValueError("limit must be an exact nonnegative integer")
+    parsed = []
+    for item in ranges:
+        try:
+            start, end = item
+        except (TypeError, ValueError):
+            raise ValueError("each range must be a pair")
+        # However tuple/list length 2 unpack. If item is e.g. 3, TypeError. If length >2, ValueError.
+        # But if item is e.g. (1,2,3), unpack raises ValueError too many values. Good.
+        # If item is string "12", unpack works to '1','2', then type check rejects. Good.
+        if type(start) is not int or type(end) is not int:
+            raise ValueError("range endpoints must be exact integers")
+        if start < 0 or start > end:
+            raise ValueError("range must satisfy 0 <= start <= end")
+        if limit is not None and end > limit:
+            raise ValueError("range end exceeds limit")
+        if start < end:
+            parsed.append((start,end))
+    parsed.sort(key=lambda r: r[0]) # sorted by start; if same start order maybe by end? Requirement sort by start. Could sort tuple naturally also by end, okay. But "sort by start" if same start no matter. Use key start.
+    if not parsed: return []
+    merged = []
+    cur_s, cur_e = parsed[0]
+    for s,e in parsed[1:]:
+        if s <= cur_e: # overlapping or touching, since half-open touching if s == cur_e should merge. Example (0,4),(4,9) -> (0,9). Condition s <= cur_e. Also if s < cur_e overlap. If s > cur_e disjoint.
+            if e > cur_e:
+                cur_e = e
+        else:
+            merged.append((cur_s,cur_e))
+            cur_s,cur_e = s,e
+    merged.append((cur_s,cur_e))
+    return merged
+```
+
+Need consider sorting by start only. If two ranges same start, e.g. (0,10), (0,5), sorting by start only may arbitrary maintain input? Python sort stable. If first (0,10) then second (0,5), merge: s=0 <= cur_e 10, e=5 not > cur_e, cur_e remains 10. fine. If first (0,5), second (0,10), cur_e becomes 10. fine. If same start and sorted by start only, no issue because all merged into max end. If ranges with same start and disjoint? start same, they overlap, max end. fine.
+
+Need handle item is generator? pair? "Each input item is a (start,end) pair" Could be list. unpack okay. But if item is tuple length 2. Need malformed pairs. If item is an iterator that yields two values, unpack works. But "pair" maybe tuple. Fine.
+
+Potential issue: `start, end = item` for item as dict? Unpacks keys. Could be length 2. Type checks. Fine.
+
+Need write unittest tests under if __name__ == '__main__'. Include tests covering unsorted overlap, adjacency, disjoint and empty ranges, duplicates, generator, input preservation, limit zero/boundary/overflow, reversed and negative endpoints, bool/float endpoints, malformed pairs. Need maybe include example. We can use unittest.main().
+
+Need complete module in fenced python block no external dependencies. Explanation brief. Let's design tests.
+
+Need test "input preservation": If input is list of tuples, after call unchanged. Also "never mutate input or its items". We can test list and tuple items. Example:
+```
+input_ranges = [(8,12),(0,4),(4,9),(20,20),(30,32)]
+original = list(input_ranges)
+result = coalesce_ranges(input_ranges)
+self.assertEqual(input_ranges, original)
+self.assertIsNot(input_ranges, result)
+```
+But input item tuples immutable. We can test list items? If input item is list? But type hints tuple. It says "input item is a (start,end) pair", maybe could be tuple. Input preservation: if ranges is list of lists, our unpack doesn't mutate. But output list of tuples. Need test no mutation of input list and inner tuple. Since tuples immutable. Maybe test list with tuples. Return new list.
+
+Test malformed pairs:
+- `[(0,)]` ValueError
+- `[(0,1,2)]` ValueError
+- `[None]` ValueError
+- `[("0", 1)]` ValueError (type check)
+- `[(0,1), (2,)]` should raise after consuming first? yes.
+Need if malformed pair item is not iterable. `except (TypeError, ValueError)` catches. But if item is `None`, `start,end = None` raises TypeError. Good.
+Could `item` be list length 2 with bool? type check.
+
+Test bool/float endpoints:
+```
+for bad in [(True,2),(1,False),(1.0,2),(0,2.5)]:
+   with assertRaises(ValueError): coalesce_ranges([bad])
+```
+But note bool endpoint 0? True invalid. Need bool invalid even if True == 1. type(True) is bool. Good.
+
+Test reversed and negative:
+- `[(5,4)]` start>end ValueError.
+- `[(-1,3)]` start<0 ValueError.
+- `[(0,-1)]` start>end? start 0 > -1 and start<0? Actually end negative; start<=end fails? 0<=-1 false. ValueError. Good.
+
+Test limit zero:
+- `limit=0`: ranges `[(0,0),(0,1)]`: (0,0) empty discarded; (0,1) end > limit raises ValueError. But if all empty, returns []. Need test `coalesce_ranges([], limit=0)==[]` and `coalesce_ranges([(0,0)], limit=0)==[]`. Also limit zero overflow `[(0,1)]` raises.
+- boundary: `limit=10`, `[(0,10)]` returns [(0,10)], `[(0,11)]` raises.
+- limit invalid: `limit=True` ValueError, `limit=-1`, `limit=1.0`.
+Need "limit zero/boundary/overflow" tests.
+
+Test adjacency: `[(0,4),(4,9)] == [(0,9)]`.
+Unsorted overlap: example `[(8,12),(0,4),(4,9),(20,20),(30,32)] == [(0,12),(30,32)]`. Note (20,20) empty.
+Disjoint and empty ranges: `[(0,1),(20,20),(2,3)] == [(0,1),(2,3)]`.
+Duplicates: `[(0,2),(0,2),(1,3)] == [(0,3)]`.
+Generator: function yields ranges; call; maybe ensure consumed once? Test result.
+
+Need maybe test touching ranges with reversed? fine.
+
+Need type hints:
+```
+from typing import Iterable, Optional
+def coalesce_ranges(ranges: Iterable[tuple[int, int]], *, limit: Optional[int] = None) -> list[tuple[int, int]]:
+```
+Python 3.11.
+
+Need docstring short:
+```
+"""Coalesce half-open byte ranges ..."""
+```
+
+Potential concern: `limit` default None; type hint Optional[int]. If limit supplied as None? "If supplied, limit must be exact nonnegative integer." In Python keyword limit=None can be supplied explicitly. How distinguish supplied vs omitted? Signature `limit=None` means if caller passes `limit=None`, should that be invalid because supplied? Requirement: "If supplied, limit must be an exact nonnegative integer". If `limit=None` is passed, is it supplied? Usually default indicates no limit. The phrase "If supplied, limit" could mean if not None. But if user passes `limit=None`, is supplied? Hm. They likely expect `limit=None` means no limit. But "If supplied" maybe optional parameter. Need decide. Signature with `limit: int | None = None`. If supplied, must exact nonnegative int. Passing None maybe considered supplied? But they might test `coalesce_ranges(..., limit=None)`? The default no limit. It says "If supplied, limit must be an exact nonnegative integer" Could mean if `limit is not None`. But if supplied as None, not exact int, should raise? Ambiguous. In typical API, `limit=None` means omitted. But if explicitly supplied None, is it invalid? The parameter default None. It says "If supplied, limit must be..." Could be strict: If limit is not None? It says "If supplied, limit must be exact nonnegative integer"; if supplied None, not exact integer, raise. However many tests might call with no limit or with valid int. They may include invalid limit None? The prompt: "If supplied, limit must be an exact nonnegative integer and every end must be <= limit." Since default `limit=None`, "supplied" likely means not None. They mention "limit zero/boundary/overflow", not None. But "limit must be exact nonnegative integer" if supplied. Passing None maybe should be treated as not supplied? Need think.
+
+Function signature: `coalesce_ranges(ranges, *, limit=None)`. They explicitly say "If supplied, limit must be an exact nonnegative integer". If caller calls `coalesce_ranges([(0,1)], limit=None)`, is limit supplied? They might expect ValueError because None is not exact int. But default value None is same. In Python, you cannot tell whether a keyword argument was explicitly supplied with None vs default None unless using sentinel. Could use sentinel to distinguish. But prompt says `limit=None` in signature likely default. It doesn't require distinguishing explicit None. Usually "If supplied" means if `limit is not None`. We'll implement `if limit is not None`. If explicit None, no limit. Tests may not include. Could use sentinel to be more precise? But signature specified `limit=None`, so if using sentinel default, signature not exactly? Could define `_UNSET = object()` and `limit: int | None | object = _UNSET`, but then type hints odd. The prompt says `coalesce_ranges(ranges, *, limit=None)`. We should follow. Use None as no limit. I think fine.
+
+Need "Consume arbitrary iterable once" means not call `len` before, not convert to list twice. We loop once. Good.
+
+Need "validate every pair" even empty ranges? We validate start/end and nonnegative, start<=end, limit. Then discard empty. Good.
+
+Need "sort by start" after discarding empty. Good.
+
+Potential issue: If item is malformed pair but `start,end = item` succeeds e.g. item is tuple with bool, then type check raises. Good.
+
+Potential issue: `limit` type check before iteration. If limit is bool, type(limit) is bool not int -> raise. If limit is int but negative -> raise. If limit is None -> no check.
+
+Potential issue: "every end must be <= limit" If limit is None, no check. If limit valid, we check each end. What about start? start could be > limit? Since start <= end <= limit, start <= limit. Good.
+
+Potential issue: If limit=0 and end=0, start<=end, start>=0, so start=0. Empty discard. Good.
+
+Need write tests. Let's formulate complete code.
+
+Potential test code:
+
+```
+import unittest
+from typing import Iterable, Optional
+
+def coalesce_ranges(...):
+    ...
+
+class CoalesceRangesTests(unittest.TestCase):
+    def test_example_unsorted_overlap(self):
+        self.assertEqual(
+            coalesce_ranges([(8, 12), (0, 4), (4, 9), (20, 20), (30, 32)]),
+            [(0, 12), (30, 32)],
+        )
+
+    def test_adjacency(self):
+        self.assertEqual(coalesce_ranges([(4, 9), (0, 4)]), [(0, 9)])
+        self.assertEqual(coalesce_ranges([(0, 4), (4, 9), (9, 10)]), [(0, 10)])
+
+    def test_disjoint_and_empty(self):
+        self.assertEqual(coalesce_ranges([(0,1), (20,20), (2,3)]), [(0,1),(2,3)])
+        self.assertEqual(coalesce_ranges([]), [])
+
+    def test_duplicates(self):
+        self.assertEqual(coalesce_ranges([(0,2),(0,2),(1,3)]), [(0,3)])
+
+    def test_generator(self):
+        def gen():
+            yield (8,12)
+            yield (0,4)
+            yield (4,9)
+        self.assertEqual(coalesce_ranges(gen()), [(0,12)])
+
+    def test_input_preservation(self):
+        ranges = [(8,12),(0,4),(4,9)]
+        snapshot = list(ranges)
+        result = coalesce_ranges(ranges)
+        self.assertEqual(ranges, snapshot)
+        self.assertIsNot(result, ranges)
+        self.assertEqual(result, [(0,12)])
+
+    def test_limit_zero(self):
+        self.assertEqual(coalesce_ranges([(0,0)], limit=0), [])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0,1)], limit=0)
+
+    def test_limit_boundary(self):
+        self.assertEqual(coalesce_ranges([(0,10)], limit=10), [(0,10)])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0,11)], limit=10)
+
+    def test_limit_invalid(self):
+        for bad in (-1, True, 1.0, "10"):
+            with self.assertRaises(ValueError):
+                coalesce_ranges([], limit=bad)
+
+    def test_reversed_and_negative_endpoints(self):
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(5,4)])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(-1,3)])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0,-1)])
+
+    def test_bool_and_float_endpoints(self):
+        for bad in [(True,2), (1,False), (1.0,2), (0,2.5)]:
+            with self.assertRaises(ValueError):
+                coalesce_ranges([bad])
+
+    def test_malformed_pairs(self):
+        for bad in [None, (0,), (0,1,2), "12"]:
+            with self.assertRaises(ValueError):
+                coalesce_ranges([bad])
+
+if __name__ == '__main__':
+    unittest.main()
+```
+
+Need note `bad` "12" item unpack start='1', end='2', type check raises ValueError. Good.
+Potential issue for `None`: `start,end = None` TypeError caught. Good.
+But our `try: start, end = item` catches TypeError, ValueError. For string "12", unpack succeeds, type check raises. Good.
+For item `(0,)` unpack raises ValueError (not enough values), caught. For `(0,1,2)`, ValueError too many values. Good.
+For item `0` (int), `start,end=0` TypeError. Good.
+For item generator with only one? unpack maybe ValueError? If generator yields one, ValueError? Actually `start, end = generator` if generator yields exactly one raises ValueError not enough values? It consumes generator. Caught. Fine.
+
+Need maybe test `limit` invalid "10". `type(limit) is not int` -> raise. Good. But `limit=None` no check. If explicit None maybe no raise. Not tested.
+
+Need maybe test limit overflow in generator: `coalesce_ranges([(0,10),(5,11)], limit=10)` raises. Already `(0,11)`.
+
+Need maybe test "limit zero/boundary/overflow" includes overflow. Good.
+
+Need maybe include example in docstring? Not necessary but short docstring.
+
+Potential type hint for limit: Optional[int]. But if limit can be None. Use `Optional[int]`. In Python 3.11 can use `int | None` but Optional fine. The prompt says include clear type hints. Use modern `Iterable[tuple[int,int]]` and `list[tuple[int,int]]`. For `limit: int | None = None` maybe better. Need no external dependencies. `typing` standard.
+
+Need consider "Endpoints must be exact integers (bool is invalid), with 0 <= start <= end." If start/end are `numpy.int64`? No external dependencies. type is not int, reject. "exact integers" means type int. Good.
+
+Potential issue: `isinstance(start, int) and not isinstance(start, bool)` would accept int subclass. But exact might require type(start) is int. Let's use type(x) is int. This rejects int subclass. Is that expected? "exact integers" yes. Could be "exact integer" meaning not bool/float, but int subclasses? Rare. Use type is int.
+
+Need maybe validate malformed pairs with item being a list of length 2. We allow list. The output tuples. "never mutate input or its items" we don't. Good.
+
+Potential issue: "Consume arbitrary iterable once" and if limit invalid, we don't consume. But if limit invalid, no need. But if they test generator with side effect and invalid limit? Not likely. Could validate limit after first iteration? But "If supplied, limit must be exact..." If limit invalid, raise. It might be okay before consuming. But "Consume arbitrary iterable once, validate every pair" maybe if limit invalid, raise before consuming, not consume. Fine.
+
+Potential issue: If limit valid and ranges is a set, sorting parsed list. Good.
+
+Potential issue: If input iterable yields malformed pair after some valid pairs, we raise. We don't return partial. Good.
+
+Potential issue: If input iterable is an iterator, we consume exactly once. We don't convert to list except normalized. Good.
+
+Need maybe avoid mutating input item? `start, end = item` doesn't mutate. `parsed.append((start,end))` new tuples. Good. If item is a list, we don't mutate it. Good.
+
+Need final answer code block only? Prompt: "Return one complete Python module in a single fenced python block, with no external dependencies." Explanation brief. We can include just code block. Maybe before code "```python". No extra. The final answer should be code. Desired oververbosity 5; explanation brief. We can include code only.
+
+Let's ensure code syntax. Use `from typing import Iterable, Optional`. In Python 3.11, `list[tuple[int,int]]` okay. `Optional[int]`. Function docstring. In validation, use `except (TypeError, ValueError):` but if `item` is e.g. a tuple of length 2 and start/end types invalid, no exception. Good.
+
+Potential subtle: `start, end = item` if item is a string "12", unpack gives '1','2'. Then type check `type(start) is not int` raises ValueError. Good.
+Potential subtle: `start,end = item` if item is a list of two ints. Good. Output tuple.
+Potential subtle: If item is a tuple with 2 elements and one is bool, type check raises.
+Potential subtle: If item is a tuple `(0, 0)` empty, we validate, then discard. Good.
+Potential subtle: If limit is `0`, and item `(0,0)` empty, end<=limit true, start<end false discard. If item `(0,1)`, end=1>0 raise. Good.
+Potential subtle: If limit is negative, we raise before iterating. Good.
+Potential subtle: If limit is `True`, type(True) is bool, not int -> raise. Good.
+Potential subtle: `limit=0` is int, type int -> valid.
+Potential subtle: `limit=10`, `end=10` valid. Good.
+
+Need maybe include `if __name__ == '__main__': unittest.main()`. Good.
+
+Let's final.</think>```python
+from typing import Iterable, Optional
+import unittest
+
+
+def coalesce_ranges(
+    ranges: Iterable[tuple[int, int]],
+    *,
+    limit: Optional[int] = None,
+) -> list[tuple[int, int]]:
+    """Coalesce half-open byte ranges [start, end), merging overlaps and adjacency."""
+
+    if limit is not None:
+        if type(limit) is not int or limit < 0:
+            raise ValueError("limit must be an exact nonnegative integer")
+
+    parsed: list[tuple[int, int]] = []
+
+    for item in ranges:
+        try:
+            start, end = item
+        except (TypeError, ValueError) as exc:
+            raise ValueError("each range must be a pair") from exc
+
+        if type(start) is not int or type(end) is not int:
+            raise ValueError("range endpoints must be exact integers")
+
+        if start < 0 or start > end:
+            raise ValueError("range must satisfy 0 <= start <= end")
+
+        if limit is not None and end > limit:
+            raise ValueError("range end exceeds limit")
+
+        if start < end:
+            parsed.append((start, end))
+
+    parsed.sort(key=lambda pair: pair[0])
+
+    if not parsed:
+        return []
+
+    merged: list[tuple[int, int]] = []
+    cur_start, cur_end = parsed[0]
+
+    for start, end in parsed[1:]:
+        if start <= cur_end:
+            if end > cur_end:
+                cur_end = end
+        else:
+            merged.append((cur_start, cur_end))
+            cur_start, cur_end = start, end
+
+    merged.append((cur_start, cur_end))
+    return merged
+
+
+class CoalesceRangesTests(unittest.TestCase):
+    def test_unsorted_overlap_example(self) -> None:
+        self.assertEqual(
+            coalesce_ranges([(8, 12), (0, 4), (4, 9), (20, 20), (30, 32)]),
+            [(0, 12), (30, 32)],
+        )
+
+    def test_adjacency(self) -> None:
+        self.assertEqual(coalesce_ranges([(4, 9), (0, 4)]), [(0, 9)])
+        self.assertEqual(coalesce_ranges([(0, 4), (4, 9), (9, 10)]), [(0, 10)])
+
+    def test_disjoint_and_empty_ranges(self) -> None:
+        self.assertEqual(
+            coalesce_ranges([(0, 1), (20, 20), (2, 3)]),
+            [(0, 1), (2, 3)],
+        )
+        self.assertEqual(coalesce_ranges([]), [])
+
+    def test_duplicates(self) -> None:
+        self.assertEqual(
+            coalesce_ranges([(0, 2), (0, 2), (1, 3)]),
+            [(0, 3)],
+        )
+
+    def test_generator(self) -> None:
+        def make_ranges():
+            yield (8, 12)
+            yield (0, 4)
+            yield (4, 9)
+
+        self.assertEqual(coalesce_ranges(make_ranges()), [(0, 12)])
+
+    def test_input_preservation(self) -> None:
+        ranges = [(8, 12), (0, 4), (4, 9)]
+        snapshot = list(ranges)
+
+        result = coalesce_ranges(ranges)
+
+        self.assertEqual(ranges, snapshot)
+        self.assertIsNot(result, ranges)
+        self.assertEqual(result, [(0, 12)])
+
+    def test_limit_zero(self) -> None:
+        self.assertEqual(coalesce_ranges([(0, 0)], limit=0), [])
+
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0, 1)], limit=0)
+
+    def test_limit_boundary(self) -> None:
+        self.assertEqual(coalesce_ranges([(0, 10)], limit=10), [(0, 10)])
+
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0, 11)], limit=10)
+
+    def test_limit_invalid(self) -> None:
+        for bad_limit in (-1, True, 1.0, "10"):
+            with self.assertRaises(ValueError):
+                coalesce_ranges([], limit=bad_limit)
+
+    def test_reversed_and_negative_endpoints(self) -> None:
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(5, 4)])
+
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(-1, 3)])
+
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0, -1)])
+
+    def test_bool_and_float_endpoints(self) -> None:
+        for bad_range in [(True, 2), (1, False), (1.0, 2), (0, 2.5)]:
+            with self.assertRaises(ValueError):
+                coalesce_ranges([bad_range])
+
+    def test_malformed_pairs(self) -> None:
+        for bad_range in [None, (0,), (0, 1, 2), "12"]:
+            with self.assertRaises(ValueError):
+                coalesce_ranges([bad_range])
+
+
+if __name__ == "__main__":
+    unittest.main()
+```<｜end▁of▁sentence｜>

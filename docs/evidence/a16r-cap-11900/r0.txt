@@ -1,0 +1,396 @@
+We need answer with one complete Python module in fenced python block, no external deps. Need implement coalesce_ranges and tests under __main__. Need clear type hints, short docstring. Need validate exact ints bool invalid, 0 <= start <= end, limit exact nonnegative int, every end <= limit. Consume arbitrary iterable once. Malformed pairs raise ValueError. Need decide malformed pairs include not sequence length 2? Each input item is (start,end). Need validate every pair. If item not length 2 or not tuple? "Each input item is a (start, end) pair" and malformed pairs raise ValueError. Should accept maybe any iterable pair? It says input item is a (start,end) pair, likely tuple. Validate by unpacking; if item isn't iterable length 2, raise ValueError. Need not accept booleans. sort by start, merge overlaps/touching. Empty returns []. Input preservation, never mutate input or items. Consume once. If ranges generator, use list? Consume once while validating. Need sort.
+
+Need tests covering specified cases. Use unittest. Need maybe type hint: def coalesce_ranges(ranges: Iterable[tuple[int,int]], *, limit: int|None = None) -> list[tuple[int,int]]. But if malformed items maybe Iterable[tuple[int,int]].
+
+Need implement robust validation. Details:
+
+- Validate limit if not None:
+  - exact nonnegative int: isinstance(limit,int) and not isinstance(limit,bool), limit >=0 else ValueError.
+- For each item from ranges:
+  - Need treat malformed: if not a pair? Use try: start, end = item except (TypeError, ValueError) raise ValueError. But if item is string length 2, unpack gives chars, then validate endpoints not int -> ValueError. That's fine.
+  - But if item is tuple length 3, unpack error ValueError. If item is list length 2, okay; item itself not mutated. "pair" maybe accept list? It says each item is a (start,end) pair; we can accept Sequence length 2. Need decide. We can write helper:
+    if not isinstance(item, Sequence) or isinstance(item, str)? But without external deps. Simpler: try start, end = item; except Exception? Need catch TypeError and ValueError. But e.g. item is int -> TypeError "cannot unpack non-iterable int". item is tuple length >2 -> ValueError. Good.
+  - Validate start/end exact ints: isinstance(x, int) and not isinstance(x,bool). If bool invalid.
+  - start >=0, start <= end. End <= limit if limit is not None.
+  - Discard empty start==end after validation? Need validate empty ranges? They say discard empty ranges. Endpoints valid, 0<=start<=end. Empty range start=end valid. We can skip after validation. If end==start, skip.
+  - If start>end ValueError (reversed).
+  - Negative endpoints ValueError.
+  - If end > limit ValueError.
+- Sorting: store valid non-empty pairs. sort by start. Merge.
+- Merge overlapping or touching: if start <= current_end, merge max end. Since touching start == current_end. Need keep original list new. We can use list of tuples, sorted (creates new list of tuples but tuples from input maybe same objects? But tuples immutable, and we create new tuples on merge. Could preserve? No mutation. Fine).
+- Return new list tuples. If duplicates, sorted; merging.
+- Note if duplicate empty ranges e.g. (20,20) discard, but still validate. Duplicates? (1,3),(1,3) merge. Test.
+
+Need include tests under if __name__ == '__main__': maybe define class TestCoalesceRanges(unittest.TestCase). Need ensure module can run. Include all specified cases. Need cover unsorted overlap, adjacency, disjoint and empty ranges, duplicates, generator, input preservation, limit zero/boundary/overflow, reversed and negative endpoints, bool/float endpoints, malformed pairs. Could build comprehensive tests.
+
+Need be careful test assertions for ValueError. Limit zero: If limit=0, valid ranges only (0,0) empty -> []? Every end <=0. If non-empty (0,1) end>0 ValueError. limit zero boundary: coalesce_ranges([(0,0)], limit=0) == []; coalesce_ranges([(0,1)], limit=0) ValueError. limit boundary: ranges with end == limit valid. overflow: end > limit ValueError. Include.
+
+Need "malformed pairs": e.g., (1,), (1,2,3), 5, None, maybe "ab"? Need tests. But careful: item "ab" unpacks start='a', end='b'; validation not int -> ValueError. We'll include maybe [(1,2,3)], [(1,)].
+
+Need "bool/float endpoints": ranges [(True, 2)] ValueError; [(1, 2.0)] ValueError. Also maybe limit bool invalid. We should test limit bool. Spec says "If supplied, limit must be exact nonnegative integer" means bool invalid. Include test maybe.
+
+Need "reversed and negative endpoints": (5,4) ValueError; (-1,2) ValueError; (2,-1)? start 2, end -1 -> start<=end false and negative endpoint; ValueError. Good.
+
+Potential issue: For malformed pairs, if item is None, try start,end = None -> TypeError. Catch. Need catch both TypeError and ValueError. But if item is a generator? "Each input item is pair"; if item is generator yielding exactly 2, unpack works, consumes item? It says consume arbitrary iterable once, maybe item can be iterable. But don't need. Use try/except (TypeError, ValueError). Could catch broad Exception? Better catch ValueError and TypeError. What if unpacking item triggers other exception? Not likely. Use try except (TypeError, ValueError) as exc: raise ValueError(...) from exc.
+
+Need consider "exact integers" includes numpy ints? No external; isinstance np.int not int maybe invalid. Exact int means type int. Use isinstance(x,int) and not bool. Note in Python subclasses of int? bool only. Other int subclasses accepted? "exact integers" could mean type(x) is int, not bool. But likely bool invalid, float invalid. Could use isinstance(value, int) and not isinstance(value, bool). If custom int subclass? Exact might require type(value) is int. But tests only bool/float. "exact integers" maybe not bool. If limit is bool, invalid. Use `type(value) is int`? That rejects subclasses like IntEnum. But no external. Could use `isinstance(value, int) and not isinstance(value, bool)` which accepts subclasses? It says exact integers; maybe use `type(value) is int` to be precise. However in Python, `isinstance(True, int)` true; check not bool. What about `int` subclass? "exact" means `type(x) is int`, but then custom subclass invalid. I'd use `type(x) is int` for exact. But for limit similarly. Need ensure Python 3.11 type hints okay.
+
+Need create module with docstring. Could include imports: from typing import Iterable, Optional? Python 3.11 supports list[tuple[int,int]], int | None. Need import Iterable. `from typing import Iterable` or `from collections.abc import Iterable`? For runtime? Type hints only. Use `from typing import Iterable`. Python 3.11.
+
+Implementation draft:
+
+from typing import Iterable
+
+def coalesce_ranges(ranges: Iterable[tuple[int, int]], *, limit: int | None = None) -> list[tuple[int, int]]:
+    """
+    Return coalesced half-open byte ranges [start, end) from `ranges`.
+    ...
+    """
+    if limit is not None:
+        if type(limit) is not int or limit < 0:
+            raise ValueError("limit must be a nonnegative exact integer")
+    valid: list[tuple[int,int]] = []
+    for item in ranges:
+        try:
+            start, end = item
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"malformed range pair: {item!r}") from exc
+        if type(start) is not int or type(end) is not int:
+            raise ValueError(f"range endpoints must be exact integers: {item!r}")
+        if start < 0 or end < start:
+            raise ValueError(f"invalid range: {item!r}")
+        if limit is not None and end > limit:
+            raise ValueError(f"range end exceeds limit {limit}: {item!r}")
+        if start != end:
+            valid.append((start,end))
+    valid.sort(key=lambda pair: pair[0]) # sort by start; tie? default tuple sort maybe by end. Need sort by start only; if same start, order by end? Use key first. But merging independent. Could sort.
+    merged: list[tuple[int,int]] = []
+    for start,end in valid:
+        if not merged:
+            merged.append((start,end))
+        else:
+            cur_start, cur_end = merged[-1]
+            if start <= cur_end:
+                if end > cur_end:
+                    merged[-1] = (cur_start, end)
+            else:
+                merged.append((start,end))
+    return merged
+
+Need check sort key: `valid.sort(key=lambda p: p[0])` stable, but if same start, order by original. Doesn't matter. Could use `valid.sort()` sorts by start then end. For merging, if same start shorter first, then longer later: start <= cur_end, update max; works. If same start longer first then shorter later: no update; fine. If adjacency: start <= cur_end merges. Good.
+
+Potential issue when start <= cur_end and end <= cur_end but start maybe less? start sorted by start, so start >= cur_start. Good.
+
+Need malformed pairs: `start,end = item` where item is list. Good. If item is tuple of bool, validation type bool not int? `type(True) is int`? Actually type(True) is bool, so invalid. Good. For float type is float invalid.
+
+Need "every pair validate" even empty ranges. We validate before discard. Good.
+
+Need "Consume arbitrary iterable once" We loop once. Good.
+
+Need "never mutate input or its items." We only read and create valid list of tuples. We don't mutate input. But `valid.append((start,end))` creates new tuple; item may be tuple and start,end extracted. If item is list, no mutation. We assign `merged[-1]` new tuple. Good.
+
+Need tests.
+
+Need include unittest and maybe use self.assertEqual and self.assertRaises. Need tests all specified. Let's design class.
+
+class TestCoalesceRanges(unittest.TestCase):
+    def test_unsorted_overlap(self):
+        self.assertEqual(coalesce_ranges([(8,12),(0,4),(4,9),(30,32)]), [(0,12),(30,32)])? Wait input includes (4,9) and (0,4) adjacent -> (0,12) with (8,12) overlap. (20,20) empty discarded. (30,32). yes. Could use exact example.
+        also unsorted overlap: [(5,10),(1,6),(8,12)] -> [(1,12)].
+    def test_adjacency(self):
+        self.assertEqual(coalesce_ranges([(1,2),(2,3),(3,4)]), [(1,4)])
+        self.assertEqual(coalesce_ranges([(1,2),(2,3)]), [(1,3)])
+    def test_disjoint_and_empty(self):
+        self.assertEqual(coalesce_ranges([(0,1),(2,3),(4,4),(5,6)]), [(0,1),(2,3),(5,6)])
+        self.assertEqual(coalesce_ranges([]), [])
+    def test_duplicates(self):
+        self.assertEqual(coalesce_ranges([(1,3),(1,3),(2,4),(2,2)]), [(1,4)])
+    def test_generator(self):
+        gen = ((start,end) for start,end in [(5,7),(1,2),(2,3),(10,10)])
+        self.assertEqual(coalesce_ranges(gen), [(1,3),(5,7)])
+        # maybe ensure generator consumed once? not necessary.
+    def test_input_preservation(self):
+        data = [(3,5),(1,2),(2,4)]
+        original = list(data)
+        result = coalesce_ranges(data)
+        self.assertEqual(data, original)
+        self.assertEqual(result, [(1,5)])
+        # Also items not mutated; if list item:
+        item = [5,7]
+        data2 = [item]
+        coalesce_ranges(data2)
+        self.assertEqual(item, [5,7])
+    def test_limit_zero(self):
+        self.assertEqual(coalesce_ranges([(0,0)], limit=0), [])
+        self.assertEqual(coalesce_ranges([(0,0),(0,0)], limit=0), [])
+        with self.assertRaises(ValueError): coalesce_ranges([(0,1)], limit=0)
+    def test_limit_boundary(self):
+        self.assertEqual(coalesce_ranges([(0,2),(2,5)], limit=5), [(0,5)])
+        self.assertEqual(coalesce_ranges([(5,5)], limit=5), [])
+    def test_limit_overflow(self):
+        with self.assertRaises(ValueError): coalesce_ranges([(0,1),(2,6)], limit=5)
+    def test_reversed_and_negative_endpoints(self):
+        with self.assertRaises(ValueError): coalesce_ranges([(5,4)])
+        with self.assertRaises(ValueError): coalesce_ranges([(-1,2)])
+        with self.assertRaises(ValueError): coalesce_ranges([(2,-1)])
+    def test_bool_float_endpoints(self):
+        with self.assertRaises(ValueError): coalesce_ranges([(True,2)])
+        with self.assertRaises(ValueError): coalesce_ranges([(1,False)])
+        with self.assertRaises(ValueError): coalesce_ranges([(1,2.0)])
+        with self.assertRaises(ValueError): coalesce_ranges([(1.0,2)])
+        with self.assertRaises(ValueError): coalesce_ranges([(0,1)], limit=True)
+    def test_malformed_pairs(self):
+        for bad in [(1,), (1,2,3), 5, None, "ab"]:
+            with self.assertRaises(ValueError): coalesce_ranges([bad])
+        # maybe malformed item empty tuple? ( ) -> `start,end = ()` ValueError. Good.
+        with self.assertRaises(ValueError): coalesce_ranges([(1,2), (3,)])
+    def test_limit_invalid(self):
+        with self.assertRaises(ValueError): coalesce_ranges([(0,1)], limit=-1)
+        with self.assertRaises(ValueError): coalesce_ranges([(0,1)], limit=1.0)
+        with self.assertRaises(ValueError): coalesce_ranges([(0,1)], limit=False)
+        with self.assertRaises(ValueError): coalesce_ranges([(0,1)], limit=None) no.
+
+Need maybe test malformed pairs with tuple of length 0. Use list.
+
+Need run if __name__ == '__main__': unittest.main()
+
+Potential issue: Test input preservation with list item [5,7]: ranges type hint Iterable[tuple[int,int]], but list item accepted. After coalesce, validation type(start) is int, type(end) is int. `valid.append((start,end))`. item remains [5,7]. Good.
+
+Need maybe include `import unittest` at top. No external dependencies; unittest stdlib. Fine.
+
+Need ensure final answer only fenced python block. They ask "Return one complete Python module in a single fenced python block, with no external dependencies. Implement ... Include ... Add unittest tests ... Complete the implementation and tests; keep your explanation brief." So final can be just code block. Need no explanation.
+
+Potential edge cases: "Endpoints must be exact integers (bool is invalid), with 0 <= start <= end." If start=0,end=0 empty valid. If end <0 but start<=end? e.g. (-2,-1): start<0 invalid. If start > end reversed invalid. If end negative and start positive? start<=end false invalid; also negative. Good.
+
+Need consider malformed pair where item is a string "12" (length 2 chars) -> start='1', end='2', endpoints not int -> ValueError. Good.
+
+Potential issue with `type(start) is int`: In Python, `bool` is not int by type. Good. What about `int` subclass? Reject. "exact integers" yes. Could mention.
+
+Need decide catch `(TypeError, ValueError)` for unpack. If item is dict with two keys? `start, end = item` yields keys, could validate keys as ints. But item is malformed as pair? It might be okay? "Each input item is a (start, end) pair", dict not pair, but if dict has two int keys, unpacking works. Then it might accept. But malformed pairs? Should we enforce item type tuple/list? The spec says each input item is a (start, end) pair, malformed pairs raise ValueError. It may be safer to enforce exactly tuple? But input item may be list? It says pair; could be tuple only. "Each input item is a (start, end) pair" Example uses tuples. "malformed pairs" likely not tuple length 2? We need robust. Could accept any iterable of length 2? But a dict with two keys yields values? Wait `start, end = item` when item is dict iterates keys, not values. It could accept dict {1:2,3:4} as start=1,end=3? That is weird. Should we reject dict? To be precise, "pair" can be tuple. But they didn't explicitly say only tuple. "Each input item is a (start, end) pair" maybe any tuple. We can enforce `isinstance(item, tuple)`? But then list item in test? We only need test input preservation maybe list item? Could use tuple. But if we enforce tuple, malformed list length 2 would raise ValueError; is that expected? Maybe "pair" means tuple. They say "Each input item is a (start, end) pair". I think accepting list may be okay as pair. But dict weird. How to robustly validate pair? We can use `isinstance(item, (tuple, list))`? But pair could be any sequence. The tests we add can avoid ambiguous. But implementation should be general.
+Need "malformed pairs must raise ValueError". We can validate `len(item)` if it has length? But for generator length unknown. Simpler: try unpack. If object is a dict with exactly two keys, unpack succeeds. Is that malformed? It is not a pair of endpoints? It is an iterable of keys, but could be considered malformed. But not likely tested. We can enforce item is a tuple? The signature says `Iterable[tuple[int,int]]`; type hints indicate tuple. So reject non-tuple. But then list item would be malformed. The spec says input item is a (start,end) pair; in Python parentheses denote tuple. Use type hint `Iterable[tuple[int, int]]`. Should enforce `isinstance(item, tuple)`? But "malformed pairs" might include e.g. `(1,2,3)`. If someone passes list `[1,2]`, is that malformed? It's not a tuple, but is a pair. The spec says each input item is a (start,end) pair, not necessarily tuple? Hmm.
+
+Let's parse: "Each input item is a (start, end) pair representing a half-open byte range [start, end). Consume an arbitrary iterable once, validate every pair, discard empty ranges..." In Python, `(start, end)` is tuple. They likely expect tuples. "never mutate the input or its items" could include tuple items. Tests specified "input preservation"; can use list of tuples. No need list item. We can enforce item has exactly two elements. Use `start,end = item` and check if item is tuple? But malformed pair if not tuple. But if item is a custom pair, okay? Need decide.
+
+Maybe implement helper `_validate_pair(item)`:
+```
+if not isinstance(item, tuple):
+    raise ValueError(f"range must be a tuple: {item!r}")
+if len(item) != 2: ...
+start, end = item
+```
+But spec says "Each input item is a (start, end) pair" and type hint tuple. This is strict. Is there any test with generator yielding lists? They didn't ask. Could accept list as valid; no harm. But if we enforce tuple, tests we write use tuples. Good.
+
+But "malformed pairs" includes malformed pairs, not malformed item types. If input is list `[1,2]`, is it a pair? It's a list pair. Might be acceptable. To be safe, accept any sequence of length 2? We can check:
+```
+try:
+    start, end = item
+except (TypeError, ValueError):
+    raise ValueError
+```
+If item is list length 2, accepted. If item is dict with two keys, accepted but weird. Could reject dict by requiring `isinstance(item, (tuple, list))` or more generally `isinstance(item, Sequence) and not str/bytes`. But "pair" could be tuple. Simpler: `if not isinstance(item, tuple) or len(item) != 2: raise ValueError`. But then list `[5,7]` in input preservation test would be invalid. Use tuple item in test. Good.
+
+However, if `item` is a bool? unpack TypeError. Good.
+Need "malformed pairs" raise ValueError. Use try/except.
+
+Potential issue with `ranges` itself being malformed, e.g., not iterable? `for item in ranges` raises TypeError, not ValueError. Spec says input iterable; invalid values or malformed pairs raise ValueError. If ranges not iterable? Maybe not required. Could catch TypeError on iterating? Arbitrary iterable assumed. No need.
+
+Need include tests for malformed pair `(1,2,3)` if we enforce tuple len. Good.
+
+Need consider "bool is invalid" for limit. `type(limit) is int` rejects bool. Good.
+
+Need "limit zero/boundary/overflow": In limit zero, `coalesce_ranges([(0,0)], limit=0)` returns [] because empty discarded. `coalesce_ranges([(0,0),(0,0)], limit=0) == []`. Overflow with (0,1),(2,6) limit=5 -> end 6 >5 ValueError. Boundary (0,2),(2,5) limit=5 -> merged (0,5). Good.
+
+Need "duplicates": duplicate ranges e.g. (1,3),(1,3) merge (1,3). Duplicate empty (2,2) discard. Good.
+
+Need "unsorted overlap": example with (8,12),(0,4),(4,9),(20,20),(30,32). Note (0,4) and (4,9) touch -> merge (0,9), then (8,12) overlap -> merge (0,12). (20,20) discarded. (30,32). Good. Our sort key by start only: sorted valid: (0,4),(4,9),(8,12),(30,32). Merge: (0,4); next start=4 <= cur_end=4 -> update to (0,9); next start=8 <=9 -> update to (0,12); next start=30 >12 -> append. Good.
+
+Need maybe include type hints in tests? Not necessary.
+
+Need final code. Could include `from __future__ import annotations`? Python 3.11 supports union `int | None`. Use `from typing import Iterable`. Could include `from __future__ import annotations` optional. Not necessary.
+
+Need decide if to catch `ValueError` from unpack and raise ValueError. But if unpacking tuple length 3, Python raises ValueError "too many values to unpack". We catch and raise new ValueError. Good.
+
+Potential problem: If item is a tuple with start,end but start is bool, type(start) is bool not int. Good.
+
+Potential problem: If limit is not None, and `type(limit) is not int` but limit is e.g. `True`, type bool not int. Good.
+
+Potential problem: If `limit` is `0`, and range empty with end=0, valid. If range (0,0) skipped. If range start=0,end=0, okay. If range (0,0) limit=0, skip. Good.
+
+Need maybe validate every pair before discarding empty. Our order: unpack, type, start<0 or end<start, limit end>limit, then if start!=end append. Good.
+
+Need "discard empty ranges" after validation. Good.
+
+Need "sort by start" but if sort key only start, tie not sorted by end. Merging works because start sorted; for same start, any order okay? Let's check same start with current. Suppose valid (0,10),(0,5). Sort by start only stable original order. If (0,10) first, current (0,10); next start=0 <=10, end=5 > cur_end? no, stays (0,10). Correct. If (0,5) first then (0,10), update to (0,10). Correct. If same start and one empty discarded. Good.
+Need merge overlapping/touching: `if start <= cur_end`. If `end > cur_end`, update. If start <= cur_end but end <= cur_end, no update. Good. If start > cur_end, append. Good.
+
+Need include docstring short: "Coalesce validated half-open byte ranges [start, end), merging overlapping or touching intervals." Maybe mention raises ValueError. Good.
+
+Need code block only. Let's final.</think>```python
+from typing import Iterable
+import unittest
+
+
+def coalesce_ranges(
+    ranges: Iterable[tuple[int, int]], *, limit: int | None = None
+) -> list[tuple[int, int]]:
+    """
+    Coalesce half-open byte ranges [start, end), merging overlapping or
+    touching ranges. Input is consumed once and is not mutated.
+
+    Raises ValueError for invalid endpoints, malformed pairs, or an invalid
+    limit. Empty ranges are discarded.
+    """
+    if limit is not None:
+        if type(limit) is not int or limit < 0:
+            raise ValueError("limit must be a nonnegative exact integer")
+
+    validated: list[tuple[int, int]] = []
+
+    for item in ranges:
+        try:
+            start, end = item
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"malformed range pair: {item!r}") from exc
+
+        if type(start) is not int or type(end) is not int:
+            raise ValueError(
+                f"range endpoints must be exact integers: {item!r}"
+            )
+
+        if start < 0 or end < start:
+            raise ValueError(f"invalid range: {item!r}")
+
+        if limit is not None and end > limit:
+            raise ValueError(f"range end exceeds limit {limit}: {item!r}")
+
+        if start != end:
+            validated.append((start, end))
+
+    validated.sort(key=lambda pair: pair[0])
+
+    merged: list[tuple[int, int]] = []
+    for start, end in validated:
+        if not merged:
+            merged.append((start, end))
+            continue
+
+        current_start, current_end = merged[-1]
+        if start <= current_end:
+            if end > current_end:
+                merged[-1] = (current_start, end)
+        else:
+            merged.append((start, end))
+
+    return merged
+
+
+class TestCoalesceRanges(unittest.TestCase):
+    def test_unsorted_overlap(self) -> None:
+        self.assertEqual(
+            coalesce_ranges([(8, 12), (0, 4), (4, 9), (20, 20), (30, 32)]),
+            [(0, 12), (30, 32)],
+        )
+        self.assertEqual(
+            coalesce_ranges([(5, 10), (1, 6), (8, 12)]),
+            [(1, 12)],
+        )
+
+    def test_adjacency(self) -> None:
+        self.assertEqual(
+            coalesce_ranges([(1, 2), (2, 3), (3, 4)]),
+            [(1, 4)],
+        )
+        self.assertEqual(
+            coalesce_ranges([(4, 8), (0, 4), (8, 10)]),
+            [(0, 10)],
+        )
+
+    def test_disjoint_and_empty_ranges(self) -> None:
+        self.assertEqual(
+            coalesce_ranges([(0, 1), (2, 3), (4, 4), (5, 6)]),
+            [(0, 1), (2, 3), (5, 6)],
+        )
+        self.assertEqual(coalesce_ranges([]), [])
+
+    def test_duplicates(self) -> None:
+        self.assertEqual(
+            coalesce_ranges([(1, 3), (1, 3), (2, 4), (2, 2)]),
+            [(1, 4)],
+        )
+
+    def test_generator(self) -> None:
+        generator = (
+            (start, end) for start, end in [(5, 7), (1, 2), (2, 3), (10, 10)]
+        )
+        self.assertEqual(
+            coalesce_ranges(generator),
+            [(1, 3), (5, 7)],
+        )
+
+    def test_input_preservation(self) -> None:
+        data = [(3, 5), (1, 2), (2, 4)]
+        original = list(data)
+
+        result = coalesce_ranges(data)
+
+        self.assertEqual(data, original)
+        self.assertEqual(result, [(1, 5)])
+
+    def test_limit_zero(self) -> None:
+        self.assertEqual(coalesce_ranges([(0, 0)], limit=0), [])
+        self.assertEqual(coalesce_ranges([(0, 0), (0, 0)], limit=0), [])
+
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0, 1)], limit=0)
+
+    def test_limit_boundary(self) -> None:
+        self.assertEqual(
+            coalesce_ranges([(0, 2), (2, 5)], limit=5),
+            [(0, 5)],
+        )
+        self.assertEqual(coalesce_ranges([(5, 5)], limit=5), [])
+
+    def test_limit_overflow(self) -> None:
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0, 1), (2, 6)], limit=5)
+
+    def test_reversed_and_negative_endpoints(self) -> None:
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(5, 4)])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(-1, 2)])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(2, -1)])
+
+    def test_bool_float_endpoints(self) -> None:
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(True, 2)])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(1, False)])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(1, 2.0)])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(1.0, 2)])
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0, 1)], limit=True)
+
+    def test_malformed_pairs(self) -> None:
+        for bad in [(1,), (1, 2, 3), 5, None, "ab"]:
+            with self.assertRaises(ValueError):
+                coalesce_ranges([bad])
+
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(1, 2), (3,)])
+
+    def test_invalid_limit(self) -> None:
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0, 1)], limit=-1)
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0, 1)], limit=1.0)
+        with self.assertRaises(ValueError):
+            coalesce_ranges([(0, 1)], limit=False)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```<｜end▁of▁sentence｜>

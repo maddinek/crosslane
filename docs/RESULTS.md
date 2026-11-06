@@ -5,13 +5,15 @@ driver 1.17.39758), Ryzen 9 9950X3D, 128 GB DDR5, both GPUs on PCIe 5.0 ×8.
 Model: DeepSeek V4.1 Flash GSQ-RCO IQ2_XXS pack (40 layers, 384 routed experts, 6 per token,
 ~132 GB of expert payload). Upstream Strata `ffa80d73` (v0.2.10).
 
-Protocol for every row: one persistent warm engine; canonical 325-token coding prompt (complete
+Protocol for fork rows, with stock noted below: one persistent warm engine; canonical 325-token coding prompt (complete
 Python module + tests); sampled decoding T=1, top_p 1, top_k 64, min_p 0; seeds 1000 (warm-up,
 excluded), then 1001–1003; 8,192-token cap; context 12,288; frozen scorer. tok/s = generated
-outputs / decode wall time. Placement per run: R9700 resident bank ~21.6 GB, B65 warm bank ~25 GB
+outputs / decode wall time. Placement in the latest runs: R9700 resident bank ~21.6 GB, B65 warm bank ~25 GB
 (under a 28.5 GB ceiling incl. runtime overhead), RAM store 110 GB budget with 32 readers and full
 preload (~101.9 GB used). Experts never come from disk during decode (100% store hits); the two Engram
-tables (103 GB) are still read from disk, 48 rows per token.
+tables (110.6 GB, 103 GiB) are still read from disk, 48 rows per token.
+
+The stock row used one GPU, 16 readers and about 89% store hits with about 53 MB per token of disk misses, so 2.59× is an observed whole-system comparison, not a matched kernel A/B. The speed-run logs stay private for now; sample answers are in [evidence/](evidence/).
 
 | run | change | r0 | r1 | r2 | median | strict |
 |---|---|---:|---:|---:|---:|---|
@@ -23,13 +25,12 @@ tables (103 GB) are still read from disk, 48 rows per token.
 | a8c | all dense on the R9700 (cut 0), packed-strip B65 kernel | 14.41 | 13.72 | 15.39 | 14.41 | 1/3 |
 | a8r | + rebalance on a8c costs | 15.63 | 15.71 | 15.01 | 15.63 | 0/3 |
 | a8r2 | + second rebalance round | 16.02 | 15.85 | 15.38 | 15.85 | 0/3 |
-
 | a11 | queued R9700 dense schedule + a third rebalance round | 17.04 | 14.97 | 17.23 | 17.04 | 0/3 |
 | a13 | exact-order B65 SoA kernel, CPU layer batching, default placement | 16.44 | 16.73 | 15.63 | 16.44 | 1/3 |
 | a13r | + rebalance | 18.04 | 18.48 | 17.80 | 18.04 | 0/3 |
 | a14 | + R9700 per-layer expert batching, default placement | 17.25 | 14.60 | 17.58 | 17.25 | 1/3 |
 | a14r | + rebalance | 21.29 | 21.27 | 19.62 | 21.27 | 2/3 |
-| a15 | + parallel Engram reads (QD8, read-ahead), default placement | 18.22 | 18.84 | 18.31 | 18.31 | 1/3 |
+| a15 | + parallel Engram reads (QD8, read-ahead; called Engram a3 privately), default placement | 18.22 | 18.84 | 18.31 | 18.31 | 1/3 |
 | a15r | + rebalance | 22.40 | 22.57 | 22.61 | 22.57 | 0/3 |
 | a16 | + AVX2 combine, early expert start, default placement (answers token-identical to a15) | 20.63 | 20.69 | 20.73 | 20.69 | 1/3 |
 | a16r | + rebalance | 25.47 | 25.57 | 25.65 | **25.57** | 0/3 |
@@ -38,14 +39,14 @@ tables (103 GB) are still read from disk, 48 rows per token.
 Strict = the generated module's own tests plus independent functional checks pass. With 3 sampled
 answers per run this is noisy, and many of the faster runs hit the 8,192 cap while still reasoning;
 the fastest measured passing code at this cap is 333 s (a16 r2). All three a16r answers were cut off at
-the cap (text normal, not looping); across our history 43 of 72 comparable answers hit it, so that's plausible
-by chance and neither shows nor rules out a regression.
+the cap (text normal, not looping); across our history 43 of 72 comparable answers hit it (a descriptive count
+with repeated streams, not independent trials), which neither shows nor rules out a regression.
 
 With a cap of 11,900 at the a16r setup (one warm-up, one measured answer): 6,288 tokens at 25.64 tok/s, then
 7,179 tokens at 25.59 tok/s, finished by itself, strict pass, 13 own tests, working code in **295 s**. That's one
 answer. A 10-answer test at this cap is the real check and hasn't run yet.
 
-## Where a token goes (a8c, per-kernel timers)
+## Where a token goes in earlier runs (a8c kernel timers and later a9 medians, separate diagnostics)
 
 R9700 dense, ~28 ms/token, of which 23.2 ms are kernel spans: matrix-vector products 11.9 (≈ the 10.6–13.2 ms memory-bandwidth floor),
 sparse attention 3.0, norm/RoPE finish 1.8, HC mix/split + pre-norm 2.5, router + route + top-k 1.9,
@@ -60,8 +61,8 @@ Per expert selection in a real run (from per-layer lane service deltas): CPU ~0.
 Decode-only per fed token, pooled over three answers: wall 39.124 ms; dense excluding Engram-containing regions
 22.149 ms; those regions 1.741 ms; expert join 11.914 ms; wall minus dense minus join 3.321 ms. Overlapping service: CPU 8.692,
 B65 9.583, R9700 8.153 ms. Selected experts per token: R9700 154.7, B65 55.6, CPU 29.7 (default placement 113.3 / 52.0 / 74.6).
-One measured diagnostic answer with kernel timers and an exclusive host partition (25.57 tok/s, no timer-off pair, not a
-speed claim): dense 19.752, join 11.823, shared-FFN wait 5.603, head 0.995, everything else 0.946 ms.
+Separate diagnostic, one measured answer with kernel timers and an exclusive host partition (25.57 tok/s, no timer-off pair, not a
+speed claim; its boundaries differ from the numbers above): dense 19.752, join 11.823, shared-FFN wait 5.603, head 0.995, remaining small steps including copies and device waits 0.946 ms.
 
 Kernels over seven decode samples, launch spans including queue gaps: matrix-vector 8.020 + 3.638, attention 2.627, finish 1.641,
 HC mix 1.337, HC pre-norm 1.007, router 0.842, head 0.736, route 0.629, ring copies 0.681, hc_post 0.334, SwiGLU 0.296, top-k 0.270 ms.
@@ -73,13 +74,13 @@ Estimates for what's left on exact kernels: 26–28 tok/s, no credible exact rou
 
 ## Long prompts and long context
 
-- Prefill, one teacher-forced 8,192-token stream on a15r, a slope diagnostic: 1,024 tokens 48.7 s, 4,096 182.4 s, 8,192 369.4 s (22.2 tok/s), with no slowdown by position.
+- Prefill, one teacher-forced 8,192-token stream on a15r, a slope diagnostic (not independent requests): 1,024 tokens 48.7 s, 4,096 182.4 s, 8,192 369.4 s (22.2 tok/s), with no slowdown by position.
 - 12,001 positions on a16r, unchanged reserves: R9700 28.47 GB whole device (minimum free 5.73 GB), B65 25.31 GB resident (28.5 GB ceiling), no growth with position; forced tokens ran at 23.5–25.3 tok/s. Sampling can miss spikes.
 
 ## DSpark and Q2_K
 
 - DSpark projection micro on real weights, R9700: batched rows byte-identical to serial on all 15 tensor signatures, T=1..6. Three rows cost 0.34–0.52 of three serial calls on Q5_K and Q8_0 tensors (head 1.02× one row, attention output 1.52×). Synthetic inputs, projections only. Acceptance on this edited model and the whole cycle are unmeasured.
-- Q2_K re-encoding of experts: stopped by a rule set before the run. Warm µs per selection at N=1/2/3/6: R9700 IQ 80.6/62.7/50.8/40.6, Q2_K 80.1/52.0/43.6/33.9; B65 IQ 187.7/152.3/139.4/124.8, Q2_K 212.6/173.1/157.1/142.2. Projected net −3.18 ms per token, because bigger experts push 1,434 back to the CPU.
+- Q2_K re-encoding of experts: stopped by a rule set before the run. Warm µs per selection at N=1/2/3/6: R9700 IQ 80.6/62.7/50.8/40.6, Q2_K 80.1/52.0/43.6/33.9; B65 IQ 187.7/152.3/139.4/124.8, Q2_K 212.6/173.1/157.1/142.2. Projected on the a14r base, not measured end to end: net −3.18 ms per token, because bigger experts push 1,434 back to the CPU.
 
 ## Where a token goes (a14r)
 

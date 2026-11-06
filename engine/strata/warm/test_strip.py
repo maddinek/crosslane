@@ -48,9 +48,7 @@ def test_changed_sign_word_fails_proof(tmp_path):
 
 
 def test_packed_strip_frozen_with_all_a7_flags():
-    import ast
-    tree=ast.parse((HERE/'warm_config.py').read_text());ns={'SYCL_FIXED_BYTES':3*2**30}
-    exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='config'],type_ignores=[]),'config','exec'),ns)
+    ns={};exec(compile((HERE/'warm_config.py').read_text(),'warm_config.py','exec'),ns)
     cfg=ns['config']
     assert all(k not in cfg('/p',True) for k in ('warm_dense_owner','warm_hip_schedule','warm_kernel_timing','warm_sycl_experts'))
     value=cfg('/p',True,dense_owner='hip-v1',hip_schedule='queued-v1',kernel_timing=True,sycl_experts='packed-strip-v1')

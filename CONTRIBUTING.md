@@ -31,12 +31,12 @@ issue or PR.
 
 Ranked by expected gain on the reference machine (39.1 ms/token today, 33.3 ms is the goal):
 
-1. **R9700 matrix-vector kernels** (about 11.7 of 22 ms of dense). Big projections are already near the measured stream limit. HIP graph replay, SoA and reordered Q5 sums were measured and didn't help, and fusing small kernels saves under 1 ms. A real new idea here is the only exact lever big enough to matter.
+1. **R9700 matrix-vector kernels** (about 11.7 of 22 ms of dense, spans including queue gaps). Big projections are already near the measured stream limit. HIP graph replay, SoA and reordered Q5 sums were measured and didn't help, and fusing small kernels saves under 1 ms. A real new idea here is the only exact lever big enough to matter.
 2. **Speculative decoding with DeepSeek's DSpark drafter.** Projections batch well and byte-exactly. Unmeasured: acceptance on this edited model, full-row dense and expert cost, and the whole cycle. A verify path needs at least 1.5× to be worth building.
 3. **Batched prefill.** An 8,192-token prompt takes about 6 minutes today because it runs token by token. Estimated 38–72 tok/s on exact paths.
 4. **Reaching working code sooner.** Many answers hit the token cap while still reasoning. A lower reasoning effort or better planning could matter more than raw tok/s, but it has to keep quality.
 5. **Placement that knows about batching and co-selection.** Batch cost is non-linear, and the optimizer uses averages. Estimated under 1 ms, and it overlaps with more VRAM.
-6. **Join and shared-FFN overlap.** Early start proved this was worth about 3.5 ms; ordered timestamps would show what's left.
+6. **Join and shared-FFN overlap.** Early start plus the faster combine cut join by 3.5 ms when measured together (the split is inferred); ordered timestamps would show what's left.
 7. **Other hardware.** Two AMD cards, AMD + NVIDIA, Intel + NVIDIA. The placement and three-lane ideas transfer; the engine is DeepSeek-specific and the kernels cover IQ2_XXS, IQ2_XS and IQ1_M.
 
 ## Commits
