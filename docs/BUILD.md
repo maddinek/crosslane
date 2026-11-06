@@ -88,6 +88,8 @@ in place from the public shards. Keep the shards at their recorded locations.
 
 ```sh
 ./tools/bench.sh --pack /absolute/models/pack
+# Frozen a16r placement and execution modes (reference model/hardware only):
+./tools/bench.sh --pack /absolute/models/pack --preset a16 --out bench-a16
 # Alternative expert kernel (different reduction order, opt-in):
 ./tools/bench.sh --pack /absolute/models/pack --sycl-experts mmvq-soa-v1 --out bench-out-mmvq
 ```
@@ -104,6 +106,56 @@ responses, generated code text and `summary.json`. Completed decode steps per
 second are reported separately. A length-capped answer counts for speed; it
 can still be unusable. This entrypoint does not score generated code.
 
+The default `--preset baseline` preserves the original benchmark: uniform
+profile (unless supplied), native default placement, packed-strip B65 experts,
+baseline HIP schedule, serial HIP experts, no early issue or Engram read-ahead.
+It does not reproduce the best measured result.
+
+`--preset a16` selects the execution settings and measured placement from the
+three-answer **a16r** run: `mmvq-soa-v2` on B65, `layer-batch-v1` HIP experts,
+CPU layer batching, `queued-v1`, `early-v1`, AVX2/FMA SIMD combine, and
+`read-ahead-v1` Engram with QD8 and a 128 MiB packed row cache. HIP graphs,
+fusion, GEMV alternatives, CPU affinity/prefetch/spin and diagnostic host
+timers remain off. It uses the same default memory/thread budgets listed
+below. Explicit budget/thread overrides describe a different setup.
+
+The preset ships the frozen 40×384 selection counts and placement under
+`presets/a16/` as UTF-8 text. It reconstructs the uint32 little-endian profile
+in the output directory and checks both original hashes:
+
+| Input | SHA256 |
+|---|---|
+| Reconstructed profile | `4fd7692bfcec8d54938c5beb6fd46ff4d7f90932cb6ef955343804426b6e73d0` |
+| Placement | `11c00818ad1ab61500f844e3dfec669e5e2ad123def4553aeac400e31b7a19ca` |
+
+Use the exact GGUF files identified in `presets/a16/metadata.json`. The wrapper
+checks dimensions, text hashes and the canonical prompt IDs; it does **not**
+hash all model weights on each launch. Verify the model checksums separately.
+A different model with the same dimensions is not the reference model.
+The a16 preset rejects custom `--profile`, `--placement` or another B65 kernel;
+use baseline for those inputs. Non-reference hardware needs new measured
+placement and memory qualification, not these frozen counts.
+
+For a16, inherited `DS4_*` and `AIOPT_ENGRAM_*` switches are replaced by the
+recorded settings, including `DS4_SYNC=1`, `DS4_ENGRAM_CACHE_MB=0`, two Engram
+threads and full store preload. The library search order is package/runtime
+then package. Logical selectors match the original launch:
+`HIP_VISIBLE_DEVICES=0`, `ONEAPI_DEVICE_SELECTOR=level_zero:gpu`.
+Physical GPU selection (for example `ROCR_VISIBLE_DEVICES`) is site-specific
+and remains inherited; no reference device UUID is shipped. `command.json`
+records the selected preset, placement hash and effective execution environment.
+
+The CPU entrypoint test compares the generated configuration, actual native
+argv/environment and request bytes against an independently extracted a16r
+freeze fixture in `tests/fixtures/a16r-runtime.json`, with paths relocated.
+It checks real profile/placement hashes and deliberately contaminated ambient
+settings. The native process alone is mocked. This closes the launch-input gap;
+the standalone toolchain build, tokenizer, native bank reconstruction, GPU
+identity, memory safety, quality scoring and speed still need an end-to-end
+run on the reference hardware. The separate 295-second passing answer used
+an 11,900-token cap and one measured draw; this command reproduces the
+8,192-cap, three-answer speed-run protocol, not that quality experiment.
+
 Defaults reserve 28.5 GB on Intel, 30.45 GB on AMD, 3 GiB Intel runtime overhead,
 ~1.53 GB AMD fixed overhead, and a 110 GB RAM store with an 8 GiB available-memory
 floor. Use `--help` for explicit byte budgets and CPU/store thread counts.
@@ -112,7 +164,7 @@ not supported by this path. The Intel driver can spill to host memory rather
 than rejecting allocation: measure your runtime overhead and keep headroom.
 The full preload refuses when the non-GPU experts do not fit the store.
 
-Without `--profile`, layer/expert counts are uniform and placement differs from
+With baseline and no `--profile`, layer/expert counts are uniform and placement differs from
 the published runs. Supply an actual uint32 little-endian count profile to rank
 experts, and optionally `--placement` for an already computed compatible warm
 placement. New measured selection profiles are retained as `decode-profile*`.

@@ -18,6 +18,38 @@ sys.path[:0] = [str(ROOT/'engine/strata/warm'), str(ROOT/'engine/strata/parity-g
 from warm_config import config
 import host_profile
 
+A16 = ROOT/'presets/a16'
+# Execution settings from the frozen rebalanced a16 run, not new tuning defaults.
+A16_ENV = {
+    'DS4_ENGRAM_CACHE_MB':'0', 'DS4_ENGRAM_THREADS':'2', 'DS4_SYNC':'1',
+    'DS4_CPU_LAYER_BATCH':'1', 'DS4_OTHER_COMBINE_SIMD':'1',
+    'AIOPT_ENGRAM_QD':'8', 'AIOPT_ENGRAM_RANDOM':'0', 'AIOPT_ENGRAM_EXTENTS':'0',
+    'AIOPT_ENGRAM_CACHE_BYTES':'134217728', 'AIOPT_ENGRAM_CACHE_DIAG':'1',
+    'HIP_VISIBLE_DEVICES':'0', 'ONEAPI_DEVICE_SELECTOR':'level_zero:gpu',
+}
+
+
+def a16_inputs(pack):
+    """Reconstruct the original uint32 LE profile from reviewable text only."""
+    meta = dict(line.split(' ',1) for line in (pack/'ds4.txt').read_text().splitlines() if line)
+    recorded = json.loads((A16/'metadata.json').read_text())
+    dimensions = [int(meta['num_hidden_layers']), int(meta['n_routed_experts'])]
+    if dimensions != recorded['dimensions']:
+        raise ValueError('a16 preset requires the recorded model dimensions; use the baseline preset for other models')
+    for name, digest in recorded['text_sha256'].items():
+        if sha(A16/name) != digest:
+            raise ValueError('a16 preset text changed: '+name)
+    lines = (A16/'profile-counts.txt').read_text().splitlines()
+    if lines[0] != 'CROSSLANE_COUNTS_V1 '+ ' '.join(map(str, dimensions)):
+        raise ValueError('invalid a16 count header')
+    counts = [list(map(int, line.split())) for line in lines[1:]]
+    if len(counts) != dimensions[0] or any(len(row) != dimensions[1] for row in counts):
+        raise ValueError('invalid a16 count dimensions')
+    data = struct.pack('<'+'I'*(dimensions[0]*dimensions[1]), *(n for row in counts for n in row))
+    if hashlib.sha256(data).hexdigest() != recorded['profile_sha256']:
+        raise ValueError('reconstructed a16 profile differs from the measurement')
+    return data, (A16/'placement.txt').read_bytes()
+
 
 def sha(path):
     with Path(path).open('rb') as f:
@@ -75,17 +107,22 @@ def parse_stream(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--preset', choices=['baseline', 'a16'], default='baseline',
+                   help='baseline preserves the original uniform/packed-strip setup; a16 uses the frozen measured placement and runtime')
     p.add_argument('--pack', type=Path, required=True)
     p.add_argument('--package', type=Path, default=ROOT/'build/package')
     p.add_argument('--upstream', type=Path, default=ROOT/'build/upstream/strata')
     p.add_argument('--out', type=Path, default=ROOT/'bench-out')
     p.add_argument('--profile', type=Path, help='uint32 LE layer/expert counts; default uniform, not the published placement')
     p.add_argument('--placement', type=Path, help='optional precomputed compatible warm placement file')
-    p.add_argument('--sycl-experts', choices=['serial-v1', 'grouped-v1', 'packed-strip-v1', 'mmvq-soa-v1'], default='packed-strip-v1')
+    p.add_argument('--sycl-experts', choices=['serial-v1', 'grouped-v1', 'packed-strip-v1', 'mmvq-soa-v1', 'mmvq-soa-v2'])
     for key, default in [('sycl-cap',28500000000), ('hip-cap',30450647040), ('sycl-fixed',3*2**30),
                          ('hip-fixed',1529365504), ('store-bytes',110000000000), ('cpu-threads',16), ('store-threads',32)]:
         p.add_argument('--'+key, type=int, default=default)
     a = p.parse_args()
+    if a.preset == 'a16' and (a.profile or a.placement or a.sycl_experts not in (None, 'mmvq-soa-v2')):
+        p.error('a16 binds its profile, placement and mmvq-soa-v2 kernel; use baseline for custom inputs')
+    a.sycl_experts = a.sycl_experts or ('mmvq-soa-v2' if a.preset == 'a16' else 'packed-strip-v1')
     for name in ('pack', 'package', 'upstream', 'out'):
         setattr(a, name, getattr(a, name).resolve())
     if any(getattr(a, k) <= 0 for k in ('sycl_cap','hip_cap','sycl_fixed','hip_fixed','store_bytes','cpu_threads','store_threads')):
@@ -96,33 +133,47 @@ def main():
     ids = tok.encode(prompt['rendered'], parse_special=True)
     if ids != prompt['ids'] or len(ids) != 325:
         raise ValueError('pack tokenizer does not match the canonical prompt; refusing benchmark')
+    # Validate the reference text before creating output or starting native work.
+    reference = a16_inputs(a.pack) if a.preset == 'a16' else None
     a.out.mkdir(parents=True)
-    if a.profile:
+    if reference:
+        (a.out/'profile.bin').write_bytes(reference[0])
+    elif a.profile:
         profile = a.profile.resolve()
         (a.out/'profile.bin').write_bytes(profile.read_bytes())
     else:
         meta = dict(line.split(' ',1) for line in (a.pack/'ds4.txt').read_text().splitlines() if line)
         (a.out/'profile.bin').write_bytes(struct.pack('<I',1)* (int(meta['num_hidden_layers'])*int(meta['n_routed_experts'])))
     profile = a.out/'profile.bin'
-    cfg = config(profile, True, dense_owner='hip-v1', sycl_attention='subgroup32-v1', sycl_experts=a.sycl_experts)
+    modes = dict(hip_schedule='queued-v1', hip_experts='layer-batch-v1',
+                 engram='read-ahead-v1', expert_issue='early-v1') if reference else {}
+    cfg = config(profile, True, dense_owner='hip-v1', sycl_attention='subgroup32-v1', sycl_experts=a.sycl_experts, **modes)
     cfg = cfg.replace('cpu_threads=16\n',f'cpu_threads={a.cpu_threads}\n').replace('warm_sycl_fixed='+str(3*2**30), 'warm_sycl_fixed='+str(a.sycl_fixed)).replace('warm_hip_fixed=1529365504',f'warm_hip_fixed={a.hip_fixed}')
-    if a.placement:
-        (a.out/'placement.txt').write_bytes(a.placement.read_bytes())
+    if reference or a.placement:
+        (a.out/'placement.txt').write_bytes(reference[1] if reference else a.placement.read_bytes())
         cfg += 'warm_placement='+str(a.out/'placement.txt')+'\n'
     (a.out/'warm.conf').write_text(cfg)
     (a.out/'prompt.json').write_text(json.dumps(prompt,indent=2,ensure_ascii=False)+'\n')
     (a.out/'requests.txt').write_text(''.join(f'{1000+i} 8192 325 '+' '.join(map(str,ids))+'\n' for i in range(4)))
-    env = {**os.environ, 'DS4_FORK_WARM':'1', 'DS4_STORE_BYTES':str(a.store_bytes),
+    # Ambient experiment switches must not silently change the reference arm.
+    inherited = {k:v for k,v in os.environ.items() if not k.startswith(('DS4_', 'AIOPT_ENGRAM_'))} if reference else dict(os.environ)
+    env = {**inherited, 'DS4_FORK_WARM':'1', 'DS4_STORE_BYTES':str(a.store_bytes),
            'DS4_STORE_THREADS':str(a.store_threads), 'DS4_STORE_FLOOR_BYTES':str(8*2**30),
            'DS4_STORE_PRELOAD':'1', 'DS4_STORE_DIAGNOSTIC':'1', 'DS4_WARM_PROFILE_OUTPUT':str(a.out/'decode-profile'),
            'LD_LIBRARY_PATH':str(a.package)+':'+str(a.package/'runtime')+':'+os.environ.get('LD_LIBRARY_PATH','')}
+    if reference:
+        env.update(A16_ENV)
+        env['LD_LIBRARY_PATH'] = str(a.package/'runtime')+':'+str(a.package)
     command = [str(a.package/'strata-warm-run'), '--pack',str(a.pack),'--ctx','12288','--cut','0','--eligible-cuts','0',
         '--stage-config',str(a.out/'warm.conf'),'--profile',str(profile),'--requests',str(a.out/'requests.txt'),
         '--chosen-plan',str(a.out/'chosen-plan.json'),'--sycl',str(a.package/'libstrata-stage-sycl-model.so'),
         '--hip',str(a.package/'libstrata-stage-hip-model.so'),'--cpu-library',str(a.package/'libstrata-row2-cpu.so')]
     for key in ('sycl_cap','hip_cap','sycl_fixed','hip_fixed'):command += ['--'+key.replace('_','-'),str(getattr(a,key))]
-    (a.out/'command.json').write_text(json.dumps({'argv':command, 'environment':{k:v for k,v in env.items() if k.startswith('DS4_') or k=='LD_LIBRARY_PATH'},
-        'profile_kind':'provided' if a.profile else 'uniform', 'package_manifest_sha256':sha(a.package/'manifest.json'),
+    if reference or a.placement: command += ['--placement', str(a.out/'placement.txt')]
+    (a.out/'command.json').write_text(json.dumps({'argv':command, 'environment':{k:v for k,v in env.items() if k.startswith(('DS4_', 'AIOPT_ENGRAM_')) or k in ('LD_LIBRARY_PATH','HIP_VISIBLE_DEVICES','ROCR_VISIBLE_DEVICES','ONEAPI_DEVICE_SELECTOR')},
+        'preset':a.preset, 'profile_kind':'a16r-text-counts' if reference else 'provided' if a.profile else 'uniform',
+        'placement_sha256':sha(a.out/'placement.txt') if reference or a.placement else None,
+        'package_manifest_sha256':sha(a.package/'manifest.json'),
         'pack_metadata_sha256':{n:sha(a.pack/n) for n in ('ds4.txt','tensors.txt','engram.bin')},
         'profile_sha256':sha(profile)}, indent=2)+'\n')
     with (a.out/'engine.stdout').open('x') as stdout, (a.out/'engine.stderr').open('x') as stderr:

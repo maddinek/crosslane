@@ -15,7 +15,7 @@
 
 crosslane is a research fork of Strata (pinned at `ffa80d73`, v0.2.10). Neither GPU can hold this model alone, so the active lanes compute that layer's routed experts concurrently, and dense work stays on the R9700.
 
-> **Status: research code, tested on one machine.** The results come from these engine sources run under our private safety guards. The standalone build, pack and benchmark scripts have passed CPU tests but **haven't yet run end to end on GPUs**, and the benchmark doesn't enable every setting used for the best result yet. Expect to read code.
+> **Status: research code, tested on one machine.** The results come from these engine sources run under our private safety guards. The standalone build, pack and benchmark scripts have passed CPU tests but **haven't yet run end to end on GPUs**. Expect to read code.
 
 ## How it works
 
@@ -124,7 +124,7 @@ The rules that kept it honest: raw data for every run, at least 3 repetitions wi
 
 ## Try it
 
-See [docs/BUILD.md](docs/BUILD.md): `tools/build.sh`, `tools/pack.py`, `tools/bench.sh`. You need ROCm (HIP) for the AMD card, oneAPI 2026.1 (SYCL/ESIMD) for the Intel card and the upstream Strata source at the pinned commit. The quick benchmark uses a default placement and won't reproduce the numbers above; they use measured placement (`engine/strata/warm/make_costs.py` + `rebalance.py`).
+See [docs/BUILD.md](docs/BUILD.md): `tools/build.sh`, `tools/pack.py`, `tools/bench.sh`. You need ROCm (HIP) for the AMD card, oneAPI 2026.1 (SYCL/ESIMD) for the Intel card and the upstream Strata source at the pinned commit. `tools/bench.sh --preset a16` selects the frozen a16r settings and measured placement for this exact model and hardware (not yet run on GPUs from this repo); the default preset is a plain baseline and won't reproduce the numbers above. To measure your own placement, see `engine/strata/warm/make_costs.py` + `rebalance.py`.
 
 ## Help wanted
 

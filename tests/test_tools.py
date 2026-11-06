@@ -1,5 +1,6 @@
 """Exercise standalone entrypoints without a GPU, external checkout or network."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -35,12 +36,14 @@ def test_native_stream_warmup_excluded_and_bad_records_rejected(tmp_path):
         with pytest.raises(ValueError):m.parse_stream(path)
 
 
-def test_benchmark_entrypoint_raw_answers_and_summary(tmp_path):
+@pytest.mark.parametrize('preset',['baseline','a16'])
+def test_benchmark_entrypoint_raw_answers_and_summary(tmp_path,preset):
     pack=tmp_path/'pack';pack.mkdir();tok=pack/'tokenizer';tok.mkdir()
     for name,data in {'vocab.json':{'x':0,'y':1,'z':2},'tokenizer.json':{'pre':'deepseek3','special_ids':{}},'token_type.json':[1,3,4]}.items():
         (tok/name).write_text(json.dumps(data))
     (tok/'merges.txt').write_text('')
-    (pack/'ds4.txt').write_text('num_hidden_layers 2\nn_routed_experts 8\n')
+    layers,experts=(40,384) if preset=='a16' else (2,8)
+    (pack/'ds4.txt').write_text(f'num_hidden_layers {layers}\nn_routed_experts {experts}\n')
     for name in ('tensors.txt','engram.bin'):(pack/name).write_bytes(b'fixture')
     upstream=tmp_path/'upstream';(upstream/'tools').mkdir(parents=True)
     ids=json.loads((ROOT/'prompts/code.json').read_text())['ids']
@@ -51,11 +54,20 @@ def test_benchmark_entrypoint_raw_answers_and_summary(tmp_path):
  def decode(self,ids):return 'fixture answer'
 ''')
     package=tmp_path/'package';package.mkdir();(package/'manifest.json').write_text('{}')
-    binary=package/'strata-warm-run';binary.write_text('#!'+sys.executable+'\nprint('+repr(stream())+',end="")\n');binary.chmod(0o755)
+    binary=package/'strata-warm-run';binary.write_text('#!'+sys.executable+'''
+import json,os,sys
+from pathlib import Path
+Path(sys.argv[sys.argv.index('--chosen-plan')+1]).write_text(json.dumps({'argv':sys.argv,'env':dict(os.environ)}))
+print('''+repr(stream())+''',end="")
+''');binary.chmod(0o755)
     profile=tmp_path/'site.json';profile.write_text('{}')
     out=tmp_path/'out'
     env={**os.environ,'CROSSLANE_PYTHON':sys.executable,'CROSSLANE_HOST_PROFILE':str(profile),'CROSSLANE_LOCK':str(tmp_path/'gpu.lock')}
     cmd=['bash',str(ROOT/'tools/bench.sh'),'--pack',str(pack),'--package',str(package),'--upstream',str(upstream),'--out',str(out)]
+    if preset=='a16':
+        cmd+=['--preset','a16']
+        env.update(DS4_OTHER_COMBINE_SIMD='0',DS4_CPU_AFFINITY='9999',DS4_WARM_HOST_PARTITION='1',
+                   AIOPT_ENGRAM_QD='1',ROCR_VISIBLE_DEVICES='GPU-fixture',LD_LIBRARY_PATH='/ambient/unused')
     r=subprocess.run(cmd,env=env,capture_output=True,text=True)
     assert r.returncode==0,r.stdout+r.stderr
     assert 'median 8.000, min 4.000, max 16.000' in r.stdout
@@ -63,8 +75,45 @@ def test_benchmark_entrypoint_raw_answers_and_summary(tmp_path):
     assert (out/'answer-03.txt').read_text()=='fixture answer'
     assert json.loads((out/'summary.json').read_text())['tok_s']['n']==3
     assert (out/'requests.txt').read_text().count('8192 325 ')==4
-    assert len((out/'profile.bin').read_bytes())==2*8*4
+    assert len((out/'profile.bin').read_bytes())==layers*experts*4
+    record=json.loads((out/'command.json').read_text())
+    assert record['preset']==preset
+    if preset=='a16':
+        # Independent fixture extracted from the real freeze, not from bench.py.
+        expected=json.loads((ROOT/'tests/fixtures/a16r-runtime.json').read_text())
+        def relocate(value):
+            for name,path in (('@OUT@',out),('@PACK@',pack),('@PACKAGE@',package)):
+                value=value.replace(name,str(path))
+            return value
+        actual=json.loads((out/'chosen-plan.json').read_text())
+        assert (out/'warm.conf').read_text()==relocate(expected['warm_conf'])
+        assert dict(zip(actual['argv'][1::2],actual['argv'][2::2]))=={k:relocate(v) for k,v in expected['argv_options'].items()}
+        engine_env={k:v for k,v in actual['env'].items() if k.startswith(('DS4_','AIOPT_ENGRAM_')) or k in ('LD_LIBRARY_PATH','HIP_VISIBLE_DEVICES','ONEAPI_DEVICE_SELECTOR')}
+        assert engine_env=={k:relocate(v) for k,v in expected['environment'].items()}
+        assert record['environment']=={**engine_env,'ROCR_VISIBLE_DEVICES':'GPU-fixture'}
+        for name,key in (('profile.bin','profile_sha256'),('placement.txt','placement_sha256'),('requests.txt','requests_sha256')):
+            assert hashlib.sha256((out/name).read_bytes()).hexdigest()==expected[key]
+        assert record['profile_kind']=='a16r-text-counts'
+        assert record['placement_sha256']==expected['placement_sha256']
+    else:
+        cfg=module('bench').config(out/'profile.bin',True,dense_owner='hip-v1',sycl_attention='subgroup32-v1',sycl_experts='packed-strip-v1')
+        assert (out/'warm.conf').read_text()==cfg
+        assert record['profile_kind']=='uniform' and record['placement_sha256'] is None
     assert subprocess.run(cmd,env=env,capture_output=True).returncode!=0
+
+
+def test_a16_refuses_wrong_dimensions_corrupt_text_and_conflicting_inputs(tmp_path,monkeypatch):
+    import shutil
+    m=module('bench');pack=tmp_path/'pack';pack.mkdir()
+    (pack/'ds4.txt').write_text('num_hidden_layers 2\nn_routed_experts 8\n')
+    with pytest.raises(ValueError,match='dimensions'):m.a16_inputs(pack)
+    (pack/'ds4.txt').write_text('num_hidden_layers 40\nn_routed_experts 384\n')
+    copied=tmp_path/'preset';shutil.copytree(m.A16,copied);monkeypatch.setattr(m,'A16',copied)
+    counts=copied/'profile-counts.txt';counts.write_text(counts.read_text()+'\n')
+    with pytest.raises(ValueError,match='text changed'):m.a16_inputs(pack)
+    for extra in (['--profile','missing'],['--placement','missing'],['--sycl-experts','mmvq-soa-v1']):
+        r=subprocess.run([sys.executable,str(ROOT/'tools/bench.py'),'--pack',str(pack),'--preset','a16',*extra],capture_output=True,text=True)
+        assert r.returncode==2 and 'a16 binds' in r.stderr
 
 
 def test_entrypoint_help():

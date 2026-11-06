@@ -1,0 +1,53 @@
+{
+  "warm_conf": "expert_placement=all-cpu\ncpu_threads=16\ncpu_dispatch=pool-v1\ncpu_timing=0\nhip_experts=pooled-layer-v1\nhip_expert_math=per32-v1\nexpert_profile=@OUT@/profile.bin\nwarm_experts=1\nwarm_measure=1\nwarm_hip_bytes=0\nwarm_sycl_bytes=0\nwarm_hip_fixed=1529365504\nwarm_sycl_fixed=3221225472\nwarm_packed_gu=1\nwarm_sycl_attention=subgroup32-v1\nwarm_dense_owner=hip-v1\nwarm_hip_experts=layer-batch-v1\nwarm_expert_issue=early-v1\nwarm_engram=read-ahead-v1\nwarm_hip_schedule=queued-v1\nwarm_sycl_experts=mmvq-soa-v2\nwarm_placement=@OUT@/placement.txt\n",
+  "environment": {
+    "LD_LIBRARY_PATH": "@PACKAGE@/runtime:@PACKAGE@",
+    "ONEAPI_DEVICE_SELECTOR": "level_zero:gpu",
+    "HIP_VISIBLE_DEVICES": "0",
+    "DS4_ENGRAM_CACHE_MB": "0",
+    "DS4_ENGRAM_THREADS": "2",
+    "DS4_SYNC": "1",
+    "DS4_FORK_WARM": "1",
+    "DS4_STORE_THREADS": "32",
+    "DS4_STORE_BYTES": "110000000000",
+    "DS4_STORE_FLOOR_BYTES": "8589934592",
+    "DS4_STORE_DIAGNOSTIC": "1",
+    "DS4_STORE_PRELOAD": "1",
+    "DS4_WARM_PROFILE_OUTPUT": "@OUT@/decode-profile",
+    "DS4_CPU_LAYER_BATCH": "1",
+    "AIOPT_ENGRAM_EXTENTS": "0",
+    "AIOPT_ENGRAM_QD": "8",
+    "AIOPT_ENGRAM_RANDOM": "0",
+    "AIOPT_ENGRAM_CACHE_BYTES": "134217728",
+    "AIOPT_ENGRAM_CACHE_DIAG": "1",
+    "DS4_OTHER_COMBINE_SIMD": "1"
+  },
+  "argv_options": {
+    "--pack": "@PACK@",
+    "--ctx": "12288",
+    "--cut": "0",
+    "--stage-config": "@OUT@/warm.conf",
+    "--profile": "@OUT@/profile.bin",
+    "--requests": "@OUT@/requests.txt",
+    "--eligible-cuts": "0",
+    "--chosen-plan": "@OUT@/chosen-plan.json",
+    "--cpu-library": "@PACKAGE@/libstrata-row2-cpu.so",
+    "--sycl": "@PACKAGE@/libstrata-stage-sycl-model.so",
+    "--hip": "@PACKAGE@/libstrata-stage-hip-model.so",
+    "--sycl-cap": "28500000000",
+    "--hip-cap": "30450647040",
+    "--sycl-fixed": "3221225472",
+    "--hip-fixed": "1529365504",
+    "--placement": "@OUT@/placement.txt"
+  },
+  "profile_sha256": "4fd7692bfcec8d54938c5beb6fd46ff4d7f90932cb6ef955343804426b6e73d0",
+  "placement_sha256": "11c00818ad1ab61500f844e3dfec669e5e2ad123def4553aeac400e31b7a19ca",
+  "requests_sha256": "24b5053797cc4f6de9ae3960237f7a96a110883f0a3e43ee63b8b0ea247a00fb",
+  "source_sha256": {
+    "rebalanced/warm.conf": "fb8d834e47f9bcd2c8121c91f6716f0593285afda045e081ab6898a084dafa19",
+    "rebalanced/freeze.json": "e89eeef5829479faf421a2ce2fb9e41837abf77c992ff1cb50f740f1015446cf",
+    "rebalanced-run/run/fwarm-a15/container-argv.json": "74fc00b0e71d799aed2f27f8be06ea3e4734fc149655c3b67e33a2cb5fc24025",
+    "rebalanced-run/run/fwarm-a15/command.json": "40a004619c660a0eba18adc5959981c55955c68ff7995a4ce679fc3b82ef61e9"
+  },
+  "scope": "Frozen a16r native launch, paths relocated; physical ROCR selector omitted. Not a GPU execution test."
+}

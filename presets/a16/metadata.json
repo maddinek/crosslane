@@ -1,0 +1,38 @@
+{
+  "dimensions": [
+    40,
+    384
+  ],
+  "profile_sha256": "4fd7692bfcec8d54938c5beb6fd46ff4d7f90932cb6ef955343804426b6e73d0",
+  "text_sha256": {
+    "profile-counts.txt": "f5f7137fb0f5c5f1ef2d656a7ef2c0f168066ed4d5cc8aa6daaed7df88a9f8da",
+    "placement.txt": "11c00818ad1ab61500f844e3dfec669e5e2ad123def4553aeac400e31b7a19ca"
+  },
+  "model_files": [
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
+      "bytes": 39075714624,
+      "sha256": "d46efb67ccffd8fb5d7f18b423896381b9e06d8491e161c370ddf3b05b07e050"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00004.gguf",
+      "bytes": 39388449504,
+      "sha256": "cec1b2c3da429dc768b8bb9bc4dc4403d81f74d34db660a6a34ee3e555bf2c70"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00003-of-00004.gguf",
+      "bytes": 39246891616,
+      "sha256": "9d9c2140fcb134a0b9a74dedd0e5167e68077af6d08ce7f856bce112f0a35dd3"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00004-of-00004.gguf",
+      "bytes": 20527837312,
+      "sha256": "92e1b7aac2c27451977f093b89207a877221bba909424309450420f66fa42bf9"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+      "bytes": 110595290816,
+      "sha256": "3dac4c54893ad7aa89103c0028500eadc78e74112cef3a2930a97e67dc9fb4f3"
+    }
+  ]
+}
