@@ -24,12 +24,16 @@ tables (103 GB) are still read from disk, 48 rows per token.
 | a8r | + rebalance on a8c costs | 15.63 | 15.71 | 15.01 | 15.63 | 0/3 |
 | a8r2 | + second rebalance round | 16.02 | 15.85 | 15.38 | 15.85 | 0/3 |
 
-| a11 | queued R9700 dense schedule + a third rebalance round | 17.04 | 14.97 | 17.23 | **17.04** | 0/3 |
+| a11 | queued R9700 dense schedule + a third rebalance round | 17.04 | 14.97 | 17.23 | 17.04 | 0/3 |
+| a13 | exact-order B65 SoA kernel, CPU layer batching, default placement | 16.44 | 16.73 | 15.63 | 16.44 | 1/3 |
+| a13r | + rebalance | 18.04 | 18.48 | 17.80 | 18.04 | 0/3 |
+| a14 | + R9700 per-layer expert batching, default placement | 17.25 | 14.60 | 17.58 | 17.25 | 1/3 |
+| a14r | + rebalance | 21.29 | 21.27 | 19.62 | **21.27** | 2/3 |
 | a9r | MMVQ-style B65 kernel + rebalance: **failed the quality gate below, not adopted** | 18.19 | 17.05 | 18.53 | 18.19 | 0/3 |
 
 Strict = the generated module's own tests plus independent functional checks pass. With 3 sampled
 answers per run this is noisy, and many of the faster runs hit the 8,192 cap while still reasoning;
-the best time to passing code so far is 448 s (a8c r2).
+the best time to passing code so far is 345 s (a14r r0).
 
 ## Where a token goes (a8c, per-kernel timers)
 
@@ -41,6 +45,12 @@ disk reads (layers 1 and 14, 48 serial reads per token).
 Per expert selection in a real run (from per-layer lane service deltas): CPU ~0.29 ms, R9700
 ~0.12–0.13 ms, B65 ~0.32 ms. Joined expert time per token (a8r2): ~25 ms.
 
+## Where a token goes (a14r)
+
+Per fed token: dense excluding Engram 22.0–22.2 ms, Engram layers 4.7–8.9 ms, expert join 14.5 ms (service: CPU
+8.3, R9700 8.5, B65 9.4 ms), and about 6 ms in everything else. Answers of identical tokens have shown Engram
+at anywhere from about 5 to 17 ms, which accounts for most of the spread between answers (the 14.60 in a14).
+
 ## B65 kernel microbenchmarks (native, warm)
 
 | B65 expert path | per expert |
@@ -49,6 +59,9 @@ Per expert selection in a real run (from per-layer lane service deltas): CPU ~0.
 | packed whole-expert dp4a (exact order) | 0.28–0.38 ms |
 | packed strip (exact order) | 0.27–0.33 ms |
 | MMVQ-style SoA, 4–8 experts per launch (reordered sums, failed the gate below) | 0.128–0.140 ms |
+| exact-order SoA (`mmvq-soa-v2`), 4–8 experts per launch | 0.114–0.134 ms |
+
+In a real run the exact-order kernel costs about 0.18 ms per selection, because the B65 averages about 1.3 selections per layer. The R9700's per-layer batching: 95 µs at 1 expert, 227 µs for 6 (38 µs each), against 649 µs serial.
 
 ## The MMVQ kernel and the quality gate
 
@@ -65,6 +78,9 @@ activations; 5.3e-6 was on synthetic inputs and understated it) and failed the t
 | all 581 positions | 95.35% | 0.0137 | 1.486 |
 | 256 continuation positions | 95.31% | 0.0047 | 0.071 |
 
-It is not adopted, and 18.19 tok/s doesn't count as a result. One suspect is that it rounds in a different
-place and pairs accumulators across lanes. A control between exact placements has yet to show how much
-of this difference is also there between the exact lanes themselves. Passing the control wouldn't waive the gate.
+It is not adopted, and its 18.19 tok/s doesn't count as a result.
+
+A later control complicates the picture: exact kernels at a different placement differ by about as much
+(top-1 96.56%, mean KL 0.0136, max KL 1.644), while repeating a run is byte-identical. So this gate is
+stricter than the difference between our own placements. The exact-order kernel passes it outright: byte-identical at
+581 positions with no route changes, and just as fast in a run.

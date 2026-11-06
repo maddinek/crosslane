@@ -20,8 +20,8 @@ experts, 6 per token). The test machine has one AMD Radeon AI PRO R9700 (HIP), o
   fixed-order combine.
 - **Dense layers on the faster card.** All attention/shared-expert work runs on the R9700 (cut 0); the
   B65 serves experts only, so no activations cross between the cards per layer.
-- **Whole-expert packed dp4a kernels for the B65.** ESIMD kernels for IQ2_XXS, IQ2_XS and IQ1_M (gate,
-  up and down), plus an exact-order subgroup attention kernel.
+- **Exact-order expert kernels for both GPUs.** A SoA dot-product kernel on the B65 for IQ2_XXS, IQ2_XS and
+  IQ1_M (gate, up and down), per-layer expert batching on the R9700, and an exact-order subgroup attention kernel.
 - **Critical-path placement.** A rebalancer that uses measured per-lane costs from a real run moves
   experts between lanes so the three finish each layer together.
 - **Measured, not guessed.** Per-layer lane service times, store counters and per-kernel launch spans are
@@ -42,24 +42,26 @@ independent checks.
 | a6r | IQ2_XS B65 kernels + rebalance | 12.96 | 2/3 |
 | a8c | all dense on the R9700, packed-strip B65 kernel | 14.41 | 1/3 |
 | a8r2 | two rebalance rounds | 15.85 | 0/3 |
-| a11 | queued R9700 dense schedule + a third rebalance round | **17.04** | 0/3 |
-| a9r | MMVQ-style B65 kernel + rebalance: **failed our quality gate, not adopted** | 18.19 | 0/3 |
+| a11 | queued R9700 dense schedule + a third rebalance round | 17.04 | 0/3 |
+| a13 | exact-order B65 SoA kernel + rebalance | 18.04 | 0/3 |
+| a14 | R9700 per-layer expert batching + rebalance | **21.27** | 2/3 |
 
-17.04 tok/s is the best result on kernels we accept. The quality score is noisy at n=3, and the faster runs often hit the 8,192-token cap while still
-"thinking". See [docs/RESULTS.md](docs/RESULTS.md) for every run, its spread and its raw-data hashes.
+The quality score is noisy at n=3, and many answers hit the 8,192-token cap while still "thinking". The
+fastest working code so far took 345 s. See [docs/RESULTS.md](docs/RESULTS.md) for every run, its spread
+and its raw-data hashes.
 
-Where the time goes now (≈63 ms/token): R9700 dense ~28 ms (~23 ms of kernels, where the matrix-vector
-products are near the memory-bandwidth floor and ~11 ms is small kernels, plus a ~5 ms gap that is mostly
-disk reads of the two Engram tables), the joined expert lanes ~25 ms, and the rest in sampling, routing
-and host work. The default uniform placement in the quick benchmark won't reproduce these numbers: they
-use measured placement (`engine/strata/warm/make_costs.py` + `rebalance.py`).
+**Everything above is exact at a fixed placement.** The B65 SoA kernel, the queued schedule, CPU batching
+and R9700 batching produce byte-identical logits against the older baseline over 581 teacher-forced
+positions. Moving experts between lanes does change the numbers, by about top-1 96.6% and mean KL 0.014,
+most likely because the CPU and GPU lanes quantize activations differently.
 
-The MMVQ-style B65 expert kernel (opt-in, `--sycl-experts mmvq-soa-v1`) cuts the B65 from ~0.32 to ~0.19 ms
-per expert in a real run, but it reorders sums and **failed our gate**: teacher-forced against the exact
-kernels on the real prompt, top-1 agreement was 95.35% (gate ≥ 99%), mean KL 0.0137 (≤ 0.001) and max KL
-1.486 (≤ 0.01), even though the per-expert error on real activations is small (NRMSE ≤ 4.3e-4). A control
-between exact placements is still to run, and an exact-order version is next. See
-[docs/RESULTS.md](docs/RESULTS.md#the-mmvq-kernel-and-the-quality-gate).
+Where the time goes now (≈47–52 ms/token): R9700 dense ~22 ms, joined expert lanes ~14.5 ms (CPU, R9700
+and B65 within about 1 ms of each other), Engram table reads ~5–9 ms, and about 6 ms in sampling, combining and
+host work. The default placement in the quick benchmark won't reproduce these numbers: they use
+measured placement (`engine/strata/warm/make_costs.py` + `rebalance.py`).
+
+An earlier MMVQ-style kernel with reordered sums (`mmvq-soa-v1`) failed our quality gate and isn't used.
+See [docs/RESULTS.md](docs/RESULTS.md#the-mmvq-kernel-and-the-quality-gate).
 
 ## How this was built
 
@@ -79,8 +81,8 @@ the pinned commit. Model weights are not included; the pack is built from the pu
 
 ## Where to help
 
-See [CONTRIBUTING.md](CONTRIBUTING.md#where-to-help). The biggest open levers are the B65 expert kernel,
-fusing the small dense kernels on the R9700 and a faster CPU expert lane. Other GPU pairs (two AMD
+See [CONTRIBUTING.md](CONTRIBUTING.md#where-to-help). The biggest open levers are the R9700 dense kernels,
+Engram read costs and faster expert kernels on all three lanes. Other GPU pairs (two AMD
 cards, AMD + NVIDIA, Intel + NVIDIA) are untested and very welcome.
 
 ## Licence
