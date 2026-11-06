@@ -41,19 +41,24 @@ independent checks.
 | a5 | subgroup B65 attention | 12.22 | 1/3 |
 | a6r | IQ2_XS B65 kernels + rebalance | 12.96 | 2/3 |
 | a8c | all dense on the R9700, packed-strip B65 kernel | 14.41 | 1/3 |
-| a8r2 | two rebalance rounds | 15.85 | 0/3 |
-| a9 | MMVQ-style B65 expert kernel (default placement) | **15.89** | 0/3 |
+| a8r2 | two rebalance rounds | **15.85** | 0/3 |
+| a9r | MMVQ-style B65 kernel + rebalance: **failed our quality gate, not adopted** | 18.19 | 0/3 |
 
-The quality score is noisy at n=3, and the faster runs often hit the 8,192-token cap while still
+15.85 tok/s is the best result on kernels we accept. The quality score is noisy at n=3, and the faster runs often hit the 8,192-token cap while still
 "thinking". See [docs/RESULTS.md](docs/RESULTS.md) for every run, its spread and its raw-data hashes.
 
-Where the time goes now (≈63 ms/token): R9700 dense ~23 ms (the matrix-vector products are already
-near its memory-bandwidth floor; ~11 ms is small kernels), the joined expert lanes ~25 ms, and the
-rest in sampling, routing and host work. The MMVQ-style B65 expert kernel (opt-in, `--sycl-experts mmvq-soa-v1`) cuts the B65 from ~0.32 to
-~0.19 ms per expert in a real run (128–140 µs per expert in isolation, worst NRMSE 5e-6). It reorders
-sums, so it isn't bit-identical; its full quality gate (a next-token comparison on the real prompt)
-is still open. The default uniform placement in the quick benchmark won't reproduce these numbers:
-they use measured placement (`engine/strata/warm/make_costs.py` + `rebalance.py`).
+Where the time goes now (≈63 ms/token): R9700 dense ~28 ms (~23 ms of kernels, where the matrix-vector
+products are near the memory-bandwidth floor and ~11 ms is small kernels, plus a ~5 ms gap that is mostly
+disk reads of the two Engram tables), the joined expert lanes ~25 ms, and the rest in sampling, routing
+and host work. The default uniform placement in the quick benchmark won't reproduce these numbers: they
+use measured placement (`engine/strata/warm/make_costs.py` + `rebalance.py`).
+
+The MMVQ-style B65 expert kernel (opt-in, `--sycl-experts mmvq-soa-v1`) cuts the B65 from ~0.32 to ~0.19 ms
+per expert in a real run, but it reorders sums and **failed our gate**: teacher-forced against the exact
+kernels on the real prompt, top-1 agreement was 95.35% (gate ≥ 99%), mean KL 0.0137 (≤ 0.001) and max KL
+1.486 (≤ 0.01), even though the per-expert error on real activations is small (NRMSE ≤ 4.3e-4). A control
+between exact placements is still to run, and an exact-order version is next. See
+[docs/RESULTS.md](docs/RESULTS.md#the-mmvq-kernel-and-the-quality-gate).
 
 ## How this was built
 
