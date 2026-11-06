@@ -13,6 +13,8 @@
 | **Hardware** | Radeon AI PRO R9700 32 GB, Arc Pro B65 32 GB, Ryzen 9 9950X3D, 128 GB DDR5 |
 | **Goal** | 30 tok/s. **Not reached yet**; see [what's left](#whats-left) |
 
+**Why this exists:** GPUs are painfully expensive right now, and a lot of us run whatever we could get, often a mix nobody optimises for. This is one person's attempt to get the most out of the hardware they already have, shared so others can use it or share what worked on theirs. Different GPUs, different models and failures are all welcome.
+
 crosslane is a research fork of Strata (pinned at `ffa80d73`, v0.2.10). Neither GPU can hold this model alone, so the active lanes compute that layer's routed experts concurrently, and dense work stays on the R9700.
 
 > **Status: research code, tested on one machine.** The results come from these engine sources run under our private safety guards. The standalone build, pack and benchmark scripts have passed CPU tests but **haven't yet run end to end on GPUs**. Expect to read code.
@@ -128,7 +130,7 @@ See [docs/BUILD.md](docs/BUILD.md): `tools/build.sh`, `tools/pack.py`, `tools/be
 
 ## Help wanted
 
-[CONTRIBUTING.md](CONTRIBUTING.md#where-to-help) ranks what would help most: R9700 matrix-vector kernels, co-selection-aware placement, batched prefill, and other GPU pairs. Two AMD cards, AMD + NVIDIA and Intel + NVIDIA are all untested and very welcome.
+**Your own experience is the most useful thing you can share**, whatever your hardware: numbers, tweaks and what didn't work, even from a different model or tool. Open an issue or discussion. [CONTRIBUTING.md](CONTRIBUTING.md#where-to-help) ranks what would help most: R9700 matrix-vector kernels, co-selection-aware placement, batched prefill, and other GPU pairs. Two AMD cards, AMD + NVIDIA and Intel + NVIDIA are all untested and very welcome.
 
 ## Licence
 
