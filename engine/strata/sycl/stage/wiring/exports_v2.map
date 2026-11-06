@@ -1,0 +1,1 @@
+{ global: strata_stage_open_v1; strata_stage_open_backend_v2; strata_stage_sample_warm_v1; strata_stage_warm_costs_v1; local: *; };

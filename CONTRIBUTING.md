@@ -18,12 +18,12 @@ contribution is low: a measurement on different hardware is as welcome as a kern
 ## One-command benchmark
 
 ```bash
-tools/bench.sh --model /path/to/pack --runs 3
+tools/bench.sh --pack /absolute/models/pack
 ```
 
 It runs the canonical coding prompt (one warm-up + 3 measured answers, T=1, top_k 64, 8,192-token cap),
-prints decode tok/s per answer with median/min/max, and writes the raw engine log, the per-layer lane
-times and the store counters to `bench-out/`. Please paste the summary and attach the log in your
+prints decode tok/s per answer with median/min/max, and writes the raw logs to a new `bench-out/`.
+It uses a default placement, so expect less than the measured-placement numbers in the README. Please paste the summary and attach the log in your
 issue or PR.
 
 ## Where to help

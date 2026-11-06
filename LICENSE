@@ -21,5 +21,5 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 Portions are derived from Strata and Project Maya (MIT) and from ggml/llama.cpp
-(MIT); their licences and notices are in third_party/. Files derived from Intel
+(MIT); their licences and notices are in licenses/. Files derived from Intel
 dpct helpers keep their Apache-2.0 WITH LLVM-exception headers.

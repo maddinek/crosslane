@@ -8,8 +8,9 @@ crosslane is a research fork of [Strata](https://github.com/Niko1221/Strata) (pi
 experts, 6 per token). The test machine has one AMD Radeon AI PRO R9700 (HIP), one Intel Arc Pro B65
 (SYCL/ESIMD), a Ryzen 9 9950X3D and 128 GB DDR5. Neither GPU can hold the model alone.
 
-> Status: research code. It works on the machine above and has not been tested anywhere else.
-> Expect to read code.
+> Status: research code, tested on the machine above only. The standalone build, pack and benchmark
+> scripts in this repo have passed CPU tests but have **not yet been run end to end on GPUs**; the
+> results below come from the same engine sources, run under our private run guards. Expect to read code.
 
 ## What it does
 
@@ -40,22 +41,25 @@ independent checks.
 | a5 | subgroup B65 attention | 12.22 | 1/3 |
 | a6r | IQ2_XS B65 kernels + rebalance | 12.96 | 2/3 |
 | a8c | all dense on the R9700, packed-strip B65 kernel | 14.41 | 1/3 |
-| a8r2 | two rebalance rounds | **15.85** | 0/3 |
+| a8r2 | two rebalance rounds | 15.85 | 0/3 |
+| a9 | MMVQ-style B65 expert kernel (default placement) | **15.89** | 0/3 |
 
 The quality score is noisy at n=3, and the faster runs often hit the 8,192-token cap while still
 "thinking". See [docs/RESULTS.md](docs/RESULTS.md) for every run, its spread and its raw-data hashes.
 
 Where the time goes now (≈63 ms/token): R9700 dense ~23 ms (the matrix-vector products are already
 near its memory-bandwidth floor; ~11 ms is small kernels), the joined expert lanes ~25 ms, and the
-rest in sampling, routing and host work. The next step is an MMVQ-style B65 expert kernel: on the card
-it measures 128–140 µs per expert vs ~400 µs for the exact path (NRMSE 5e-6). It isn't in a full run
-yet.
+rest in sampling, routing and host work. The MMVQ-style B65 expert kernel (opt-in, `--sycl-experts mmvq-soa-v1`) cuts the B65 from ~0.32 to
+~0.19 ms per expert in a real run (128–140 µs per expert in isolation, worst NRMSE 5e-6). It reorders
+sums, so it isn't bit-identical; its full quality gate (a next-token comparison on the real prompt)
+is still open. The default uniform placement in the quick benchmark won't reproduce these numbers:
+they use measured placement (`engine/strata/warm/make_costs.py` + `rebalance.py`).
 
 ## How this was built
 
-This was built by **Martin (the owner of the machine)** with two AI coding agents working as a pair:
+This was built by **Marty (the owner of the machine)** with two AI coding agents working as a pair:
 **Claude** (Anthropic) and **Codex** (OpenAI). Every design decision and every code change was reviewed
-by the other agent before it ran on the hardware. The agents wrote most of the code; Martin set the
+by the other agent before it ran on the hardware. The agents wrote most of the code; Marty set the
 goals ("both GPUs fully involved", "no stock runs", "30 tok/s on this hardware"), made the calls on
 trade-offs and ran the machines. Every experiment, including the failures, was logged with its raw
 data. A selection of the dead ends is in [docs/DEAD_ENDS.md](docs/DEAD_ENDS.md), because they are as
@@ -63,9 +67,9 @@ useful as the wins.
 
 ## Building
 
-See [docs/BUILD.md](docs/BUILD.md). You need ROCm (HIP) for the AMD card, oneAPI 2026.1 (SYCL/ESIMD) for
-the Intel card and the upstream Strata source at the pinned commit. Model weights are not included;
-the pack is built from the public GGUF with the scripts in `tools/`.
+See [docs/BUILD.md](docs/BUILD.md): `tools/build.sh`, `tools/pack.py`, `tools/bench.sh`. You need ROCm
+(HIP) for the AMD card, oneAPI 2026.1 (SYCL/ESIMD) for the Intel card and the upstream Strata source at
+the pinned commit. Model weights are not included; the pack is built from the public GGUF.
 
 ## Where to help
 
@@ -76,4 +80,4 @@ cards, AMD + NVIDIA, Intel + NVIDIA) are untested and very welcome.
 ## Licence
 
 MIT. Upstream Strata and Project Maya (MIT) and ggml/llama.cpp (MIT) notices are kept in
-[third_party/](third_party/). Intel dpct helper headers keep their Apache-2.0 WITH LLVM-exception headers.
+[licenses/](licenses/) and `engine/strata/sycl/moe/licenses/`. Intel dpct helper headers keep their Apache-2.0 WITH LLVM-exception headers.

@@ -1,0 +1,124 @@
+cmake_minimum_required(VERSION 3.24)
+# Standalone, ONE toolchain per configure (as ../CMakeLists.txt). Model stage DSOs export BOTH the unchanged
+# v1 transport factory and the additive v2 backend factory (exports_v2.map).
+#   host : g++   -> strata-split-run, strata-layer-parity (dlopen clients, no GPU headers)
+#   sycl : icpx  -> libstrata-stage-sycl-model.so (rows 3/4/5/6 + numerics + row2 interface)
+#   hip  : not here -> upstream top-level configure + hip_top_level.cmake / hip.cmake (README section 7)
+project(strata_stage_wiring LANGUAGES CXX)
+set(STRATA_WIRING_BACKEND "host" CACHE STRING "host, sycl or hip (one per build)")
+set_property(CACHE STRATA_WIRING_BACKEND PROPERTY STRINGS host sycl hip)
+set(STRATA_WIRING_ROW2 "stub" CACHE STRING "stub, moe, or a ;-list of row-2 SYCL sources implementing sycl_row2.hpp")
+set(STRATA_WIRING_CPU_LANE "stub" CACHE STRING "stub, shared, or a ;-list of sources implementing cpu_lane.hpp")
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(W ${CMAKE_CURRENT_SOURCE_DIR})
+option(STRATA_FORK_WARM "Build opt-in cross-vendor warm serving" OFF)
+if(STRATA_FORK_WARM)
+  add_compile_definitions(STRATA_FORK_WARM=1)
+endif()
+get_filename_component(STAGE "${W}/.." ABSOLUTE)       # engine/strata/sycl/stage
+get_filename_component(SYCLROOT "${W}/../.." ABSOLUTE) # engine/strata/sycl
+set(cpu_lane_sources ${W}/cpu_lane_stub.cpp)
+set(STRATA_ROW2_CPU_LIBRARY "" CACHE FILEPATH "Exact libstrata-row2-cpu.so built by the reference HIP configure")
+if(STRATA_WIRING_CPU_LANE STREQUAL "shared")
+  if(NOT EXISTS "${STRATA_ROW2_CPU_LIBRARY}")
+    message(FATAL_ERROR "shared CPU lane requires STRATA_ROW2_CPU_LIBRARY from the reference HIP build")
+  endif()
+  set(cpu_lane_sources "")
+elseif(NOT STRATA_WIRING_CPU_LANE STREQUAL "stub")
+  set(cpu_lane_sources ${STRATA_WIRING_CPU_LANE})
+endif()
+
+function(stage_dso target)
+  target_compile_options(${target} PRIVATE -fvisibility=hidden)
+  target_link_options(${target} PRIVATE "LINKER:--version-script=${W}/exports_v2.map")
+  set_target_properties(${target} PROPERTIES BUILD_RPATH_USE_ORIGIN YES BUILD_WITH_INSTALL_RPATH YES
+    INSTALL_RPATH "$ORIGIN/runtime;$ORIGIN" POSITION_INDEPENDENT_CODE ON)
+endfunction()
+
+if(STRATA_WIRING_BACKEND STREQUAL "host")
+  add_executable(strata-split-run ${W}/split_main.cpp ${W}/pack_source.cpp)
+  add_executable(strata-layer-parity ${W}/parity/layer_parity.cpp ${W}/pack_source.cpp)
+  add_executable(strata-begin-retry-test ${W}/parity/begin_retry_test.cpp ${W}/pack_source.cpp)
+  add_executable(strata-abi-v2-canary ${W}/parity/abi_v2_canary.cpp)
+  if(STRATA_FORK_WARM)
+    add_executable(strata-warm-run ${W}/../../../warm/main.cpp ${W}/pack_source.cpp)
+    target_compile_options(strata-warm-run PRIVATE -Wall -Wextra -ffp-contract=off)
+    target_link_libraries(strata-warm-run PRIVATE ${CMAKE_DL_LIBS})
+  endif()
+  foreach(t strata-split-run strata-layer-parity strata-begin-retry-test strata-abi-v2-canary)
+    target_include_directories(${t} PRIVATE ${W} ${STAGE} ${SYCLROOT})
+    target_compile_options(${t} PRIVATE -Wall -Wextra -ffp-contract=off)
+    target_link_libraries(${t} PRIVATE ${CMAKE_DL_LIBS})
+  endforeach()
+
+elseif(STRATA_WIRING_BACKEND STREQUAL "sycl")
+  set(row2_sources ${W}/row2_stub.cpp)
+  if(STRATA_WIRING_ROW2 STREQUAL "moe")
+    set(row2_sources ${SYCLROOT}/moe/row2.cpp)
+  elseif(NOT STRATA_WIRING_ROW2 STREQUAL "stub")
+    set(row2_sources ${STRATA_WIRING_ROW2})
+  endif()
+
+  foreach(f ${SYCLROOT}/hc/hc.cpp ${SYCLROOT}/attn/attn.cpp)
+    if(NOT EXISTS ${f})
+      message(FATAL_ERROR "${f} missing: complete model-stage sources are required")
+    endif()
+  endforeach()
+  add_library(strata-stage-sycl-model SHARED
+    ${STAGE}/abi_plugin.cpp ${STAGE}/sycl_transport.cpp
+    ${W}/abi_backend_plugin.cpp ${W}/sycl_backend.cpp ${W}/pack_source.cpp ${row2_sources} ${cpu_lane_sources}
+    ${SYCLROOT}/numerics.cpp ${SYCLROOT}/hc/hc.cpp ${SYCLROOT}/attn/attn.cpp ${SYCLROOT}/engram/engram.cpp
+    ${SYCLROOT}/route/route.cpp ${SYCLROOT}/route/route_sycl.cpp)
+  if(STRATA_FORK_WARM)
+    target_sources(strata-stage-sycl-model PRIVATE ${SYCLROOT}/../warm/sycl_bank.cpp)
+    get_filename_component(WARM_REPO "${W}/../../../../.." ABSOLUTE)
+    target_include_directories(strata-stage-sycl-model PRIVATE ${WARM_REPO})
+    foreach(t strata-expert-bitcheck strata-expert-timing strata-grouped-bitcheck strata-grouped-timing strata-strip-bitcheck strata-strip-timing strata-mmvq-accuracy strata-mmvq-timing)
+      # Stage DSOs intentionally hide C++ helpers; link the exact primitive
+      # source into standalone checks instead of widening the production ABI.
+      add_executable(${t} ${SYCLROOT}/../warm/expert_check.cpp
+        ${SYCLROOT}/moe/row2.cpp ${W}/pack_source.cpp ${W}/cpu_lane_stub.cpp)
+      target_include_directories(${t} PRIVATE ${SYCLROOT} ${WARM_REPO})
+      target_compile_options(${t} PRIVATE -fsycl -fp-model=precise -ffp-contract=off)
+      target_link_options(${t} PRIVATE -fsycl)
+      set_target_properties(${t} PROPERTIES BUILD_WITH_INSTALL_RPATH YES
+        INSTALL_RPATH "$ORIGIN/runtime;$ORIGIN")
+    endforeach()
+    target_compile_definitions(strata-mmvq-accuracy PRIVATE STRATA_EXPERT_MMVQ=1)
+    target_compile_definitions(strata-mmvq-timing PRIVATE STRATA_EXPERT_MMVQ=1 STRATA_MMVQ_TIMING=1)
+    target_compile_definitions(strata-expert-timing PRIVATE STRATA_EXPERT_TIMING=1)
+    target_compile_definitions(strata-strip-bitcheck PRIVATE STRATA_EXPERT_GROUPED=1 STRATA_EXPERT_STRIP=1)
+    target_compile_definitions(strata-strip-timing PRIVATE STRATA_EXPERT_GROUPED=1 STRATA_EXPERT_STRIP=1 STRATA_GROUPED_TIMING=1)
+    target_compile_definitions(strata-grouped-bitcheck PRIVATE STRATA_EXPERT_GROUPED=1)
+    target_compile_definitions(strata-grouped-timing PRIVATE STRATA_EXPERT_GROUPED=1 STRATA_GROUPED_TIMING=1)
+    add_executable(strata-attention-bitcheck
+      ${SYCLROOT}/../fixtures/row34/native_attention.cpp ${SYCLROOT}/attn/attn.cpp)
+    target_include_directories(strata-attention-bitcheck PRIVATE ${SYCLROOT})
+    target_compile_options(strata-attention-bitcheck PRIVATE -fsycl -fp-model=precise -ffp-contract=off)
+    target_link_options(strata-attention-bitcheck PRIVATE -fsycl)
+    set_target_properties(strata-attention-bitcheck PROPERTIES BUILD_WITH_INSTALL_RPATH YES
+      INSTALL_RPATH "$ORIGIN/runtime;$ORIGIN")
+  endif()
+  target_include_directories(strata-stage-sycl-model PRIVATE ${W} ${STAGE} ${SYCLROOT} ${SYCLROOT}/route ${SYCLROOT}/engram)
+  # Row34 review finding 1: pin the FP model (icpx Release defaults to fast). No contraction, as the rows' own targets.
+  target_compile_options(strata-stage-sycl-model PRIVATE -fsycl -fp-model=precise -ffp-contract=off)
+  target_link_options(strata-stage-sycl-model PRIVATE -fsycl)
+  if(STRATA_WIRING_CPU_LANE STREQUAL "shared")
+    target_link_libraries(strata-stage-sycl-model PRIVATE "${STRATA_ROW2_CPU_LIBRARY}")
+  endif()
+  stage_dso(strata-stage-sycl-model)
+  add_executable(strata-fp8-control-sycl ${W}/parity/fp8_control_sycl.cpp ${SYCLROOT}/numerics.cpp)
+  target_include_directories(strata-fp8-control-sycl PRIVATE ${SYCLROOT})
+  target_compile_options(strata-fp8-control-sycl PRIVATE -fsycl -fp-model=precise -ffp-contract=off)
+  target_link_options(strata-fp8-control-sycl PRIVATE -fsycl)
+  set_target_properties(strata-fp8-control-sycl PROPERTIES BUILD_WITH_INSTALL_RPATH YES
+    INSTALL_RPATH "$ORIGIN/runtime;$ORIGIN")
+
+elseif(STRATA_WIRING_BACKEND STREQUAL "hip")
+  # Upstream must be the TOP-LEVEL project (its cmake/ uses CMAKE_SOURCE_DIR). Configure upstream itself:
+  #   cmake -S <Strata src> ... -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=<this dir>/hip_top_level.cmake
+  message(FATAL_ERROR "HIP targets are injected into the upstream configure; see wiring/hip.cmake and README section 7")
+else()
+  message(FATAL_ERROR "STRATA_WIRING_BACKEND must be host, sycl or hip")
+endif()

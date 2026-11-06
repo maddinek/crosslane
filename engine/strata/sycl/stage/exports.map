@@ -1,0 +1,1 @@
+{ global: strata_stage_open_v1; local: *; };
