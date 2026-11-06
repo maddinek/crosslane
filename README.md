@@ -41,10 +41,11 @@ independent checks.
 | a5 | subgroup B65 attention | 12.22 | 1/3 |
 | a6r | IQ2_XS B65 kernels + rebalance | 12.96 | 2/3 |
 | a8c | all dense on the R9700, packed-strip B65 kernel | 14.41 | 1/3 |
-| a8r2 | two rebalance rounds | **15.85** | 0/3 |
+| a8r2 | two rebalance rounds | 15.85 | 0/3 |
+| a11 | queued R9700 dense schedule + a third rebalance round | **17.04** | 0/3 |
 | a9r | MMVQ-style B65 kernel + rebalance: **failed our quality gate, not adopted** | 18.19 | 0/3 |
 
-15.85 tok/s is the best result on kernels we accept. The quality score is noisy at n=3, and the faster runs often hit the 8,192-token cap while still
+17.04 tok/s is the best result on kernels we accept. The quality score is noisy at n=3, and the faster runs often hit the 8,192-token cap while still
 "thinking". See [docs/RESULTS.md](docs/RESULTS.md) for every run, its spread and its raw-data hashes.
 
 Where the time goes now (≈63 ms/token): R9700 dense ~28 ms (~23 ms of kernels, where the matrix-vector

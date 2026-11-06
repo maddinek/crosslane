@@ -22,8 +22,9 @@ tables (103 GB) are still read from disk, 48 rows per token.
 | a6r | + critical-path rebalance from measured lane costs | 13.51 | 12.81 | 12.96 | 12.96 | 2/3 |
 | a8c | all dense on the R9700 (cut 0), packed-strip B65 kernel | 14.41 | 13.72 | 15.39 | 14.41 | 1/3 |
 | a8r | + rebalance on a8c costs | 15.63 | 15.71 | 15.01 | 15.63 | 0/3 |
-| a8r2 | + second rebalance round | 16.02 | 15.85 | 15.38 | **15.85** | 0/3 |
+| a8r2 | + second rebalance round | 16.02 | 15.85 | 15.38 | 15.85 | 0/3 |
 
+| a11 | queued R9700 dense schedule + a third rebalance round | 17.04 | 14.97 | 17.23 | **17.04** | 0/3 |
 | a9r | MMVQ-style B65 kernel + rebalance: **failed the quality gate below, not adopted** | 18.19 | 17.05 | 18.53 | 18.19 | 0/3 |
 
 Strict = the generated module's own tests plus independent functional checks pass. With 3 sampled
