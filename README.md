@@ -34,6 +34,18 @@ flowchart LR
     J --> N[Next layer]
 ```
 
+Every device is doing real work, in a different role:
+
+| | R9700 | Arc Pro B65 | CPU + RAM |
+|---|---:|---:|---:|
+| Dense work (attention, shared FFN, routing) | all of it, 22 ms | none | none |
+| Expert bank | 2,532 experts, 21.6 GB | **2,915 experts, 25.0 GB, the largest GPU bank** | 9,913 experts, 102 GB |
+| Expert picks per token, of 240 | 155 | 56 | 30 |
+| Time per pick | 0.05 ms | 0.17 ms | 0.29 ms |
+| Expert work per token | 8.2 ms | **9.6 ms, the longest lane** | 8.7 ms |
+
+The R9700 is faster per pick, so the rebalancer gives it the most-used experts, and the B65 and CPU lanes get fewer picks that take the same time overall. The three lanes finish each layer together by design. The B65 runs no dense work, so it isn't busy for the whole token. It did in earlier versions, but moving all dense to the R9700 was faster (12.96 → 14.41 tok/s; dense layer 0 took 11.5 ms on the B65 and 0.48 ms on the R9700). That's the part of "both GPUs equally involved" we haven't reached.
+
 What made the difference, in the order we found it:
 
 - **Three expert lanes per layer.** Each lane runs its picks at once, then they join in a fixed order, so the math doesn't depend on who finished first.
