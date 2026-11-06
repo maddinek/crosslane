@@ -14,6 +14,7 @@
 #include <future>
 #include <memory>
 #include "cpu_affinity.hpp"
+#include "cpu_options.hpp"
 
 namespace strata::wiring {
 class RowTeam {
@@ -24,6 +25,10 @@ class RowTeam {
     std::atomic<int> next_{0};
     int rows_=0, jobs_=0, pending_=0;
     uint64_t generation_=0;
+    // Only publication is read without mutex_. The function and completion
+    // state keep their original mutex protection and owner drain boundary.
+    std::atomic<uint64_t> published_{0};
+    const unsigned spin_us_;
     bool stop_=false;
     std::exception_ptr error_;
     std::vector<int> cpus_;
@@ -40,6 +45,13 @@ class RowTeam {
     void worker() {
         uint64_t seen=0;
         for(;;) {
+            if(spin_us_) {
+                const auto until=std::chrono::steady_clock::now()+std::chrono::microseconds(spin_us_);
+                while(published_.load(std::memory_order_acquire)==seen) {
+                    for(int i=0;i<32;++i)cpu_pause();
+                    if(std::chrono::steady_clock::now()>=until)break;
+                }
+            }
             std::unique_lock lock(mutex_);
             ready_.wait(lock,[&]{return stop_||generation_!=seen;});
             if(stop_) return;
@@ -49,12 +61,12 @@ class RowTeam {
         }
     }
     void stop() noexcept {
-        {std::lock_guard lock(mutex_);stop_=true;}
+        {std::lock_guard lock(mutex_);stop_=true;published_.store(UINT64_MAX,std::memory_order_release);}
         ready_.notify_all();
         for(auto& t:threads_) if(t.joinable()) t.join();
     }
 public:
-    explicit RowTeam(int workers,std::vector<int> cpus={}) : cpus_(std::move(cpus)) {
+    explicit RowTeam(int workers,std::vector<int> cpus={}) : spin_us_(cpu_option("DS4_CPU_SPIN_US",200)),cpus_(std::move(cpus)) {
         if(workers<1) throw std::invalid_argument("row team needs a positive worker count");
         if(!cpus_.empty()&&cpus_.size()!=size_t(workers))throw std::invalid_argument("row team affinity extent");
         try {for(int i=1;i<workers;++i) {
@@ -87,6 +99,7 @@ public:
             if(generation_==UINT64_MAX) throw std::overflow_error("row generation overflow");
             rows_=n;jobs_=1+(n-1)/64;next_=1;error_=nullptr;function_=f;
             pending_=int(threads_.size());++generation_;
+            if(spin_us_)published_.store(generation_,std::memory_order_release);
         }
         ready_.notify_all();work();
         std::unique_lock lock(mutex_);

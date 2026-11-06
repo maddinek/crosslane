@@ -1,3 +1,5 @@
+find_package(Threads REQUIRED)
+link_libraries(Threads::Threads)
 # HIP stage targets, included (deferred) at the end of upstream Strata's top-level CMakeLists.txt via
 # hip_top_level.cmake. Upstream is configured exactly as the accepted private build
 # (results/strata-cross-vendor/hip-build-a1/configure-argv.txt); this fragment only ADDS targets:
@@ -61,16 +63,31 @@ macro(strata_wiring_clone t)
   endforeach()
 endmacro()
 
+# Warm-only overlay compiles original entrypoints verbatim plus opt-in kernels.
+# The reference target continues to compile the untouched upstream source.
+if(STRATA_FORK_WARM)
+  list(FILTER kernel_src EXCLUDE REGEX "/ds4_kernels\\.cu$")
+  list(FILTER kernel_src EXCLUDE REGEX "/ds4_gguf\\.cu$")
+  list(APPEND kernel_src "${W}/../../../warm/hip_experts_gguf.hip")
+  set_source_files_properties("${W}/../../../warm/hip_experts_gguf.hip" PROPERTIES LANGUAGE HIP)
+  list(FILTER kernel_src EXCLUDE REGEX "/ds4_iq\\.cu$")
+  list(APPEND kernel_src "${W}/../../../warm/hip_dense_v2_kernels.hip")
+  set_source_files_properties("${W}/../../../warm/hip_dense_v2_kernels.hip" PROPERTIES LANGUAGE HIP)
+  list(APPEND kernel_src "${W}/../../../warm/hip_fuse_kernels.hip")
+  set_source_files_properties("${W}/../../../warm/hip_fuse_kernels.hip" PROPERTIES LANGUAGE HIP)
+endif()
+
 # Upstream objects, built with upstream's exact flags (+ PIC for the shared library).
 add_library(strata_wiring_upstream_objs OBJECT ${kernel_src})
 strata_wiring_clone(strata_wiring_upstream_objs)
+target_include_directories(strata_wiring_upstream_objs PRIVATE "${CMAKE_SOURCE_DIR}/src/dsv41")
 set_property(TARGET strata_wiring_upstream_objs PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 set_source_files_properties("${W}/hip_backend.cpp" PROPERTIES LANGUAGE HIP)
-set_source_files_properties("${W}/hip_q8k.hip" PROPERTIES LANGUAGE HIP
+set_source_files_properties("${W}/../../../warm/hip_experts.hip" "${W}/hip_q8k.hip" PROPERTIES LANGUAGE HIP
   COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
 add_library(strata-stage-hip-model SHARED
-  "${W}/hip_q8k.hip"
+  "${W}/hip_q8k.hip" "${W}/../../../warm/hip_experts.hip"
   "${STAGE}/abi_plugin.cpp" "${STAGE}/hip_transport.hip"
   "${W}/abi_backend_plugin.cpp" "${W}/hip_backend.cpp" "${W}/pack_source.cpp" ${cpu_lane_sources}
   $<TARGET_OBJECTS:strata_wiring_upstream_objs>)
@@ -96,6 +113,33 @@ target_include_directories(strata-dsv41-ref-t1 PRIVATE "${CMAKE_SOURCE_DIR}/src/
 message(STATUS "Strata wiring: HIP stage targets added (strata-stage-hip-model, strata-dsv41-ref-t1)")
 
 if(STRATA_FORK_WARM)
+  set_source_files_properties("${W}/../../../warm/hip_dense_v2_check.cpp" PROPERTIES LANGUAGE HIP)
+  add_executable(strata-hip-dense-v2-check "${W}/../../../warm/hip_dense_v2_check.cpp"
+    "${W}/pack_source.cpp" $<TARGET_OBJECTS:strata_wiring_upstream_objs>)
+  strata_wiring_clone(strata-hip-dense-v2-check)
+  target_include_directories(strata-hip-dense-v2-check PRIVATE "${W}" "${STAGE}" "${SYCLROOT}" "${CMAKE_SOURCE_DIR}/src/dsv41")
+  target_link_libraries(strata-hip-dense-v2-check PRIVATE strata-row2-cpu)
+  target_compile_options(strata-hip-dense-v2-check PRIVATE -fno-fast-math -ffp-contract=off)
+  set_target_properties(strata-hip-dense-v2-check PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES
+    HIP_STANDARD 20 HIP_STANDARD_REQUIRED YES BUILD_RPATH_USE_ORIGIN YES
+    BUILD_WITH_INSTALL_RPATH YES INSTALL_RPATH "$ORIGIN")
+  set_source_files_properties("${W}/../../../warm/hip_batch_check.cpp" PROPERTIES LANGUAGE HIP)
+  add_executable(strata-hip-batch-check "${W}/../../../warm/hip_batch_check.cpp"
+    "${W}/hip_q8k.hip" "${W}/../../../warm/hip_experts.hip" "${W}/pack_source.cpp" $<TARGET_OBJECTS:strata_wiring_upstream_objs>)
+  strata_wiring_clone(strata-hip-batch-check)
+  target_include_directories(strata-hip-batch-check PRIVATE "${W}" "${STAGE}" "${SYCLROOT}" "${CMAKE_SOURCE_DIR}/src/dsv41")
+  target_link_libraries(strata-hip-batch-check PRIVATE strata-row2-cpu)
+  target_compile_options(strata-hip-batch-check PRIVATE -fno-fast-math -ffp-contract=off)
+  set_target_properties(strata-hip-batch-check PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES
+    HIP_STANDARD 20 HIP_STANDARD_REQUIRED YES BUILD_RPATH_USE_ORIGIN YES
+    BUILD_WITH_INSTALL_RPATH YES INSTALL_RPATH "$ORIGIN")
+  set_source_files_properties("${W}/../../../warm/hip_fuse_check.cpp" PROPERTIES LANGUAGE HIP)
+  add_executable(strata-hip-fuse-check "${W}/../../../warm/hip_fuse_check.cpp"
+    $<TARGET_OBJECTS:strata_wiring_upstream_objs>)
+  strata_wiring_clone(strata-hip-fuse-check)
+  target_include_directories(strata-hip-fuse-check PRIVATE "${W}/../../../warm" "${CMAKE_SOURCE_DIR}/src/dsv41")
+  set_target_properties(strata-hip-fuse-check PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES
+    HIP_STANDARD 20 HIP_STANDARD_REQUIRED YES)
   set_source_files_properties("${W}/../../../warm/hip_dense_check.cpp" PROPERTIES LANGUAGE HIP)
   add_executable(strata-hip-dense-check "${W}/../../../warm/hip_dense_check.cpp"
     $<TARGET_OBJECTS:strata_wiring_upstream_objs>)

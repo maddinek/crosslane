@@ -3,6 +3,8 @@
 #include "../sycl/stage/wiring/weight_source.hpp"
 #include "../sycl/stage/wiring/cpu_lane.hpp"
 #include <array>
+#include <functional>
+#include "expert_timeline.hpp"
 #include <memory>
 namespace strata::wiring {
 struct WarmRedirect {
@@ -18,7 +20,7 @@ extern "C" void strata_warm_stop_workers_v1();
 void warm_set_residency(const std::vector<std::vector<int>>&,const std::vector<std::vector<int>>&);
 void warm_unregister(WarmRedirect*) noexcept;
 WarmRedirect* warm_redirect(bool hip=false);
-std::vector<float> warm_execute(CpuLane&,uint32_t,std::span<const int>,std::span<const float>,std::span<const float>,std::span<const float>);
+std::vector<float> warm_execute(CpuLane&,uint32_t,std::span<const int>,std::span<const float>,std::span<const float>,std::span<const float>,const std::function<void()>& before_hip={},ExpertTimeline* timeline=nullptr);
 class WarmStore {
 public:
     virtual ~WarmStore() = default;

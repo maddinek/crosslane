@@ -1,6 +1,8 @@
 // MIT. One upstream ExpertStore and redirect registry in libstrata-row2-cpu.so.
 #include "runtime.hpp"
+#include "host_partition.hpp"
 #include "worker.hpp"
+#include "other_combine.hpp"
 #include "diagnostic.hpp"
 #include "ds4_store.hpp"
 #include <cstdlib>
@@ -8,7 +10,11 @@
 #include <mutex>
 #include <set>
 #include <numeric>
+#include "../sycl/moe/cpu_options.hpp"
+#include <sys/mman.h>
+#include <cerrno>
 namespace strata::wiring {
+extern "C" HostPartition* strata_warm_host_partition_v1(){static HostPartition value;return &value;}
 namespace {
 using Store=strata::ds4::ExpertStore;
 void check(bool x,const char* why){if(!x)throw std::runtime_error(why);}
@@ -59,6 +65,19 @@ struct OwnedStore final:WarmStore {
    cfg.floor_bytes=number("DS4_STORE_FLOOR_BYTES",8ull<<30);cfg.reserve=0;
    cfg.ram_avail=[](){std::ifstream f("/proc/meminfo");std::string key,unit;uint64_t n;while(f>>key>>n>>unit)if(key=="MemAvailable:")return n*1024;return uint64_t(0);};
    store=std::make_unique<Store>();check(store->init(cfg,geo,direct,buffered),"warm store initialization failed");
+   // The arena is a private anonymous mapping, not malloc memory or a model
+   // file. Advice covers our own reservation before the preload first-touch.
+   // No global THP policy changes, huge pool, pinning or blocking collapse.
+   if(std::getenv("DS4_STORE_THP")) {
+    const auto thp=cpu_option("DS4_STORE_THP",1);
+    check(!store->gpu_mapped(),"CPU THP candidate requires an unmapped store");
+    const auto lo=store->arena_lo(),hi=store->arena_hi();
+    const int rc=::madvise(reinterpret_cast<void*>(uintptr_t(lo)),size_t(hi-lo),thp?MADV_HUGEPAGE:MADV_NOHUGEPAGE);
+    const int saved=rc?errno:0;
+    std::fprintf(stderr,"AIOPT_CPU_THP requested=%u lo=%llx hi=%llx advice_rc=%d errno=%d actual_pages=see_smaps\n",thp,lo,hi,rc,saved);
+    check(rc==0,"CPU store THP advice failed");
+   }
+   if(cpu_option("DS4_CPU_MEMORY_REPORT",1))std::fprintf(stderr,"AIOPT_CPU_ARENA lo=%llx hi=%llx\n",store->arena_lo(),store->arena_hi());
    std::fprintf(stderr,"AIOPT_WARM_STORE threads=%d budget=%llu slot_bytes=%zu slots=%zu floor=%zu\n",cfg.threads,(unsigned long long)cfg.budget_bytes,store->slot_bytes(),store->slots_max(),cfg.floor_bytes);
    if(number("DS4_STORE_PRELOAD",0)==1){
     size_t needed=0;for(size_t l=0;l<geo.size();++l)for(int e=0;e<geo[l].n_exp;++e)needed+=!on_gpu(l,e);
@@ -99,7 +118,9 @@ void warm_note_cpu(uint32_t l,int e,uint64_t ns){++cpu_count;cpu_ns+=ns;profile_
 void warm_note_sycl(uint32_t l,int e,uint64_t ns){++sycl_count;sycl_ns+=ns;profile_add(l,e);}
 void warm_note_hip(uint32_t l,int e){++hip_count;profile_add(l,e);}
 void warm_gpu_span(bool hip,uint32_t l,uint64_t ns){gpu_ns[size_t(hip)].at(l)+=ns;++gpu_calls[size_t(hip)].at(l);}
-std::vector<float> warm_execute(CpuLane& cpu,uint32_t layer,std::span<const int> ids,std::span<const float> weights,std::span<const float> x,std::span<const float> shared){
+std::vector<float> warm_execute(CpuLane& cpu,uint32_t layer,std::span<const int> ids,std::span<const float> weights,std::span<const float> x,std::span<const float> shared,const std::function<void()>& before_hip,ExpertTimeline* timeline){
+ auto* host=strata_warm_host_partition_v1();HostScope host_scope(host,HostPart::prepare);
+ static const auto other_options=OtherOptions::environment();
  check(ids.size()==weights.size()&&x.size()==shared.size(),"warm layer shape");
  if(!service_workers)service_workers=std::make_unique<ServiceWorkers>();
  auto& cpu_worker=service_workers->cpu;auto& sycl_worker=service_workers->sycl;auto& hip_worker=service_workers->hip;
@@ -109,29 +130,40 @@ std::vector<float> warm_execute(CpuLane& cpu,uint32_t layer,std::span<const int>
  std::vector<int> cpu_ids;for(auto i:picks[0])cpu_ids.push_back(ids[i]);cpu.prepare(layer,cpu_ids);
  struct Finish{CpuLane& cpu;~Finish(){cpu.finish();}} finish{cpu};
  using Results=std::vector<std::pair<size_t,std::vector<float>>>;
- auto work=[&](size_t tier){const auto service_begin=std::chrono::steady_clock::now();Results result;
+ if(timeline&&timeline->active)for(size_t k=0;k<3;++k)timeline->counts[k]=picks[k].size();
+ auto work=[&](size_t tier){
+ if(timeline&&timeline->active&&!picks[tier].empty())timeline->start[tier]=ExpertTimeline::now();
+ struct End {ExpertTimeline* t;size_t tier;~End(){if(t&&t->active&&t->counts[tier])t->end[tier]=ExpertTimeline::now();}} end{timeline,tier};
+ const auto service_begin=std::chrono::steady_clock::now();Results result;
  if(tier==0&&cpu.layer_batch()&&!cpu_ids.empty()){
   auto rows=cpu.experts(layer,cpu_ids,x);check(rows.size()==cpu_ids.size(),"CPU batch output count");
   for(size_t j=0;j<rows.size();++j){auto& y=rows[j];
    check(y.size()==x.size()&&std::all_of(y.begin(),y.end(),[](float v){return std::isfinite(v);}),"CPU batch output shape/nonfinite");
    result.emplace_back(picks[0][j],std::move(y));
   }
- }else if(tier==1&&redirect&&redirect->warm_grouped()&&!picks[tier].empty()){
+ }else if(tier>0&&(tier==1?redirect:hip_redirect)&&(tier==1?redirect:hip_redirect)->warm_grouped()&&!picks[tier].empty()){
   std::vector<int> selected;for(auto i:picks[tier])selected.push_back(ids[i]);
-  const auto begin=std::chrono::steady_clock::now();auto rows=redirect->warm_compute_many(layer,selected,x);
+  const auto begin=std::chrono::steady_clock::now();auto rows=(tier==1?redirect:hip_redirect)->warm_compute_many(layer,selected,x);
   const auto ns=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-begin).count());
   check(rows.size()==selected.size(),"warm grouped output count");
   for(size_t j=0;j<rows.size();++j){auto& y=rows[j];
    check(y.size()==x.size()&&std::all_of(y.begin(),y.end(),[](float v){return std::isfinite(v);}),"warm grouped output shape/nonfinite");
    // Count every selection/profile hit; charge the batch duration once, never N times.
-   warm_note_sycl(layer,selected[j],j==0?ns:0);result.emplace_back(picks[tier][j],std::move(y));
+   if(tier==1)warm_note_sycl(layer,selected[j],j==0?ns:0);else warm_note_hip(layer,selected[j]);result.emplace_back(picks[tier][j],std::move(y));
   }
  }else for(auto i:picks[tier]){auto begin=std::chrono::steady_clock::now();
   auto y=tier==0?cpu.expert(layer,ids[i],x):(tier==1?redirect:hip_redirect)->warm_compute(layer,ids[i],x);
   auto ns=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-begin).count());
   if(tier==1)warm_note_sycl(layer,ids[i],ns);if(tier==2)warm_note_hip(layer,ids[i]);
   check(y.size()==x.size()&&std::all_of(y.begin(),y.end(),[](float v){return std::isfinite(v);}),"warm output shape/nonfinite");result.emplace_back(i,std::move(y));}service_ns[tier].at(layer)+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-service_begin).count());return result;};
- std::future<Results> a,b,c;try{a=cpu_worker.submit([&]{return work(0);});b=sycl_worker.submit([&]{return work(1);});c=hip_worker.submit([&]{return work(2);});}catch(...){if(a.valid())a.wait();if(b.valid())b.wait();if(c.valid())c.wait();throw;}
+ std::array<uint64_t,3> service_before{};if(host->recording())for(size_t k=0;k<3;++k)service_before[k]=service_ns[k].at(layer);
+ host->enter(HostPart::submit);
+ std::future<Results> a,b,c;try{a=cpu_worker.submit([&]{return work(0);});b=sycl_worker.submit([&]{return work(1);});
+ // Shared completion transfers exclusive HIP stream/scratch ownership to the worker.
+ // On failure, drain CPU/B65 before their borrowed inputs/store pins leave scope.
+ if(before_hip){HostScope shared_drain(host,HostPart::ffn_wait);before_hip();}
+ c=hip_worker.submit([&]{return work(2);});}catch(...){if(a.valid())a.wait();if(b.valid())b.wait();if(c.valid())c.wait();throw;}
+ host->enter(HostPart::join);
  const auto start=std::chrono::steady_clock::now();std::array<Results,3> results;std::exception_ptr error;
  // Always join every lane even if another lane fails; inputs stay pinned until all drain.
  try{results[0]=a.get();}catch(...){error=std::current_exception();}
@@ -140,10 +172,20 @@ std::vector<float> warm_execute(CpuLane& cpu,uint32_t layer,std::span<const int>
  const auto wait=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
  ++joins.at(layer);join_ns.at(layer)+=uint64_t(wait);
  if(error)std::rethrow_exception(error);
+ if(timeline&&timeline->active)timeline->combine_start=ExpertTimeline::now();
+ host->enter(HostPart::combine);
+ if(host->recording()){std::array<uint32_t,3> counts{},batches{};std::array<uint64_t,3> elapsed{};
+ for(size_t k=0;k<3;++k){counts[k]=uint32_t(picks[k].size());bool grouped=k==0?cpu.layer_batch():(k==1?redirect:hip_redirect)&&(k==1?redirect:hip_redirect)->warm_grouped();batches[k]=grouped?uint32_t(counts[k]>0):counts[k];elapsed[k]=counts[k]?service_ns[k].at(layer)-service_before[k]:0;}
+ host->record(layer,ids,weights,counts,batches,elapsed,uint64_t(wait));}
+ if(other_options.simd){
+  auto out=other_combine(ids,weights,shared,results,other_options);
+  if(timeline)timeline->emit();return out;
+ }
  std::vector<std::vector<float>> rows(ids.size());for(auto& tier:results)for(auto& item:tier)rows[item.first]=std::move(item.second);
  std::vector<size_t> order(ids.size());std::iota(order.begin(),order.end(),0);std::sort(order.begin(),order.end(),[&](auto i,auto j){return ids[i]<ids[j];});
  std::vector<float> out(x.size(),0);for(auto i:order)for(size_t k=0;k<x.size();++k)out[k]=std::fma(weights[i],rows[i][k],out[k]);
- for(size_t k=0;k<out.size();++k)out[k]+=shared[k];return out;
+ for(size_t k=0;k<out.size();++k)out[k]+=shared[k];
+ if(timeline)timeline->emit();return out;
 }
 extern "C" void strata_warm_stop_workers_v1(){service_workers.reset();}
 extern "C" void strata_warm_reset_v1(){check(shared_store.expired()&&!redirect&&!hip_redirect,"warm reset requires drained calibration");cpu_count=sycl_count=hip_count=cpu_ns=sycl_ns=0;request_number=0;profile_active=false;}
@@ -155,7 +197,7 @@ extern "C" void strata_warm_boundary_v1(const char* event,uint64_t fed,uint64_t 
   if(const char* prefix=std::getenv("DS4_WARM_PROFILE_OUTPUT")){
    save_profile(std::string(prefix)+"-request-"+std::to_string(request_number)+".bin",decode_profile);
    if(request_number>1)for(size_t i=0;i<decode_profile.size();++i){check(measured_profile[i]<=UINT32_MAX-decode_profile[i],"measured profile overflow");measured_profile[i]+=decode_profile[i];}
-   if(request_number==4)save_profile(std::string(prefix)+"-measured.bin",measured_profile);
+   if(request_number==number("DS4_WARM_REQUESTS",4))save_profile(std::string(prefix)+"-measured.bin",measured_profile);
   }
  }
  if(number("DS4_STORE_DIAGNOSTIC",0)!=1)return;

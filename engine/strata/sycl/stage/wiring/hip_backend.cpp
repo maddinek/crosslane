@@ -6,9 +6,13 @@
 // the AMD-only reference; the SYCL port is then compared against this. Compiled as LANGUAGE HIP with
 // Strata's hip_compat/cuda_runtime.h force-included (cmake/hip_backend.cmake), like ds4_model.cu itself.
 // Derived from Project Maya / Strata (MIT); preserve third_party/project-maya/{LICENSE,NOTICE.md}.
+#ifdef STRATA_FORK_WARM
+#include "../../../warm/hip_expert_issue.hpp"
+#endif
 #include "common.hpp"
 #include "../../../warm/device_timing.hpp"
 #include "../../../warm/dense_trace.hpp"
+#include "../../../warm/engram_read_ahead.hpp"
 #include "cpu_lane.hpp"
 #include "host_plan.hpp"
 #include "ds4_kernels.cuh"
@@ -19,6 +23,7 @@
 #include <atomic>
 #include "hip_resident_bank.hpp"
 #include "../../../warm/runtime.hpp"
+#include "../../../warm/host_partition.hpp"
 #ifdef STRATA_FORK_WARM
 #include "strata/dsv41/sampler.hpp"
 #endif
@@ -26,6 +31,9 @@
 #include "hip_arena.hpp"
 #ifdef STRATA_FORK_WARM
 #include "../../../warm/hip_dense_graph.hpp"
+#include "../../../warm/route_capture.hpp"
+#include "../../../warm/hip_fuse.hpp"
+#include "../../../warm/hip_dense_v2.hpp"
 #include <array>
 #endif
 
@@ -100,12 +108,34 @@ class HipStage final : public stage::Backend
 #ifdef STRATA_FORK_WARM
     std::unique_ptr<WarmDeviceTiming<HipDecodeClock>> warm_dense_;
     DenseTrace<HipDecodeClock> dense_trace_;
+    std::unique_ptr<EngramReadAhead> engram_reads_;
+    RouteCapture route_capture_;
+    std::unique_ptr<HipExpertIssue> expert_issue_;
+    uint64_t expert_issue_calls_=0;
     std::unique_ptr<HipDecodeClock> warm_expert_clock_;
     // Per layer, no shared capture across mutable weights or residual pointers.
     std::vector<std::unique_ptr<std::array<HipDenseGraph,4>>> dense_graphs_;
+    k4::hipdense::Workspace dense_gemv_{};
+    uint64_t dense_gemv_calls_=0,dense_gemv_fallbacks_=0;
+    float* fuse_scores_ = nullptr;
+    int fuse_score_stride_ = 0;
 #endif
     DecodeEvents<HipDecodeClock> events_{timing_};
 
+    bool fuse_small()const {
+#ifdef STRATA_FORK_WARM
+        return cfg_.warm_hip_fuse=="small-v1" || cfg_.warm_hip_fuse=="all-v1";
+#else
+        return false;
+#endif
+    }
+    bool fuse_attention()const {
+#ifdef STRATA_FORK_WARM
+        return cfg_.warm_hip_fuse=="attention-v1" || cfg_.warm_hip_fuse=="all-v1";
+#else
+        return false;
+#endif
+    }
     void timing_begin(const stage::Token& t) {
         timing_.begin(cfg_.decode_timing_start,t.request,t.position,t.id);
         cpu_->begin_decode_step(timing_.active);
@@ -138,6 +168,10 @@ class HipStage final : public stage::Backend
             require(ggt > 0 && k % 256 == 0 && t.bytes == size_t(n) * gg::type_row_bytes(ggt, k), pre + ": K-quant layout");
             m.fmt = gg::kFmtGG; m.K = ggt; m.ld = int(gg::type_row_bytes(ggt, k));
         } else throw std::runtime_error(pre + ": dense dtype " + t.dtype + " not admitted (EXL3/other: fail closed)");
+#ifdef STRATA_FORK_WARM
+        if(cfg_.warm_hip_gemv!="off" && m.fmt==gg::kFmtGG && m.K==gg::iq::kQ5_K)
+            dense_gemv_.max_k=std::max(dense_gemv_.max_k,k);
+#endif
         auto bytes = ws_->read_all(t.name);
         auto* dp = arena_->dev<uint8_t>(bytes.size());
         CK(hipMemcpyAsync(dp, bytes.data(), bytes.size(), hipMemcpyHostToDevice, s_)); sync();
@@ -153,8 +187,17 @@ class HipStage final : public stage::Backend
         mv_n(j.data(), int(j.size()));
     }
     void mv_n(x3::MvJob* j, int n) {
-        for (int a = 0; a < n; a += x3::kMaxMvJobs)
-            require(gg::mv(j + a, std::min(x3::kMaxMvJobs, n - a), s_), "gg::mv failed");
+        for (int a = 0; a < n; a += x3::kMaxMvJobs) {
+            const int count=std::min(x3::kMaxMvJobs,n-a);
+#ifdef STRATA_FORK_WARM
+            if(cfg_.warm_hip_gemv!="off") {
+                if(k4::hipdense::eligible(j+a,count))++dense_gemv_calls_;else ++dense_gemv_fallbacks_;
+                require(k4::hipdense::mv(j+a,count,dense_gemv_,k4::hipdense::mode(cfg_.warm_hip_gemv.c_str()),s_),"HIP dense v2 GEMV failed");
+                continue;
+            }
+#endif
+            require(gg::mv(j+a,count,s_), "gg::mv failed");
+        }
     }
 
     void load_layer(LayerW& l) {
@@ -275,6 +318,16 @@ class HipStage final : public stage::Backend
     // live in the arena on HIP, so clearing it releases them.
     void teardown() noexcept {
 #ifdef STRATA_FORK_WARM
+        if (engram_reads_) {
+            engram_reads_->drain();
+            for (int li=0;li<g_.eg_nlayers;++li) {
+                const auto x=engram_reads_->stats(li);
+                if (x.issued) std::fprintf(stderr,"AIOPT_ENGRAM_READAHEAD layer=%d issued=%llu consumed=%llu read_wall_ns=%llu demand_wait_ns=%llu scope=stage-lifetime-overlapping-host-times\n",
+                    g_.eg_layers[size_t(li)],(unsigned long long)x.issued,(unsigned long long)x.consumed,
+                    (unsigned long long)x.read_ns,(unsigned long long)x.wait_ns);
+            }
+        }
+        engram_reads_.reset(); // joins before WeightSource, CPU lane or device storage can be released
         warm_unregister(this);
 #endif
         loaded_ = false; valid_ = false;
@@ -285,6 +338,12 @@ class HipStage final : public stage::Backend
         }
         const bool had_residents = residency_.workspace != 0;
 #ifdef STRATA_FORK_WARM
+        if(dense_gemv_.q)std::fprintf(stderr,"AIOPT_HIP_GEMV_TOTAL mode=%s candidate_calls=%llu fallback_calls=%llu\n",
+            cfg_.warm_hip_gemv.c_str(),(unsigned long long)dense_gemv_calls_,(unsigned long long)dense_gemv_fallbacks_);
+        dense_gemv_={};dense_gemv_calls_=dense_gemv_fallbacks_=0;
+        fuse_scores_=nullptr;fuse_score_stride_=0;
+        if(expert_issue_calls_)std::fprintf(stderr,"AIOPT_EXPERT_ISSUE mode=early-v1 completed=%llu\n",(unsigned long long)expert_issue_calls_);
+        expert_issue_calls_=0;expert_issue_.reset();
         dense_graphs_.clear(); // stream drained; destroy graph owners BEFORE arena/weights
 #endif
         const auto uploaded = residents_.uploaded(), hits = residents_.hits();
@@ -304,6 +363,13 @@ class HipStage final : public stage::Backend
         hccnt_ = arena_->dev<unsigned>(kWin);
         attn_scr_.max_t = k4::kAttnScratchT; attn_scr_.cap = int(g_.topk_stride());
         attn_scr_.rows = arena_->dev<uint16_t>(size_t(k4::kAttnScratchT) * g_.topk_stride() * size_t(g_.hd));
+#ifdef STRATA_FORK_WARM
+        if(fuse_attention()){
+            require(!std::getenv("DS4_ATTN_SPLIT") && !std::getenv("DS4_FAST_ATTN"), "unset alternate attention environment for HIP fusion");
+            fuse_score_stride_=g_.win+int(g_.topk_stride());
+            fuse_scores_=arena_->dev<float>(strata::ds4::moe::product(size_t(g_.heads),size_t(fuse_score_stride_)));
+        }
+#endif
         for (uint32_t il = first; il < end; ++il) {
             L_.push_back({}); L_.back().role = topo_.layers[il]; load_layer(L_.back());
             fault_.at("load_weights");
@@ -317,11 +383,23 @@ class HipStage final : public stage::Backend
             if(cfg_.warm_experts)d_.sample_token=arena_->dev<int>(1);
 #endif
         }
+#ifdef STRATA_FORK_WARM
+        if(cfg_.warm_hip_gemv!="off") {
+            require(!std::getenv("DS4_QUANT_NODEDUP") && !std::getenv("DS4_QUANT_SINGLE"),"unset quantizer diagnostic environment for HIP dense v2");
+            require(dense_gemv_.max_k>0,"HIP dense v2 has no eligible Q5 matrices");
+            const size_t values=size_t(dense_gemv_.max_k)*x3::kMaxMvJobs;
+            dense_gemv_.q=arena_->dev<int8_t>(values);
+            dense_gemv_.d=arena_->dev<float>(values/32);
+            dense_gemv_.sums=arena_->dev<k4::hipdense::Sums>(values/32);
+            std::fprintf(stderr,"AIOPT_HIP_GEMV mode=%s max_k=%d workspace_bytes=%zu\n",cfg_.warm_hip_gemv.c_str(),dense_gemv_.max_k,
+                values+(values/32)*(sizeof(float)+sizeof(k4::hipdense::Sums)));
+        }
+#endif
         fault_.at("cpu_lane");
         cpu_ = make_cpu_lane(*ws_, first, end, cfg_.cpu_threads, cfg_.cpu_dispatch, cfg_.cpu_timing);
         if (residency_.workspace) {
             resident_device_start_ = arena_->bytes;
-            residents_.load(*ws_, residency_, *arena_, s_);
+            residents_.load(*ws_, residency_, *arena_, s_, cfg_.warm_hip_experts!="serial-v1",cfg_.warm_hip_experts=="soa-v2");
 #ifdef STRATA_FORK_WARM
             if(cfg_.warm_experts)warm_register(this,true);
 #endif
@@ -355,6 +433,9 @@ class HipStage final : public stage::Backend
     }
     void layer(LayerW& l, const stage::Token& t) {
 #ifdef STRATA_FORK_WARM
+        HostScope host_dense(strata_warm_host_partition_v1(),HostPart::dense);
+#endif
+#ifdef STRATA_FORK_WARM
         dense_trace_.begin(cfg_.warm_kernel_timing,t.request,l.role.il,t.position);
         if(cfg_.warm_measure){if(!warm_dense_)warm_dense_=std::make_unique<WarmDeviceTiming<HipDecodeClock>>(size_t(g_.nl));warm_dense_->begin(s_);}
 #endif
@@ -367,7 +448,12 @@ class HipStage final : public stage::Backend
             const int cols = g.eg_cols(), ehd = g.eg_hd;
             const size_t per = size_t(cols) * size_t(ehd + ehd / 32);
             std::vector<std::byte> host(per);
-            timing_.host(timing_.engram_read_ns,[&]{ws_->engram_rows(role.eg, engram_slice(plan_, t, il), host);});
+            timing_.host(timing_.engram_read_ns,[&]{
+#ifdef STRATA_FORK_WARM
+                if (engram_reads_) { host = engram_reads_->take(role.eg); return; }
+#endif
+                ws_->engram_rows(role.eg, engram_slice(plan_, t, il), host);
+            });
             CK(hipMemcpyAsync(d.eg_rows, host.data(), per, hipMemcpyHostToDevice, s)); sync();
             const uint8_t* sc = d.eg_rows + size_t(cols) * size_t(ehd);
             dense_launch("k4::engram_dequant",[&]{return k4::engram_dequant(d.eg_rows, sc, T * cols, ehd, d.eg_x, s, ws_->engram_format(role.eg));});
@@ -386,11 +472,20 @@ class HipStage final : public stage::Backend
         dump("ring_in", il, p0, T, l.win, size_t(g.win) * g.win_rb());
         // Non-Metal hc_mix_split takes per-token zeroed block counters; T == 1 needs one (allocated with mix).
         dense_group(il,0,[&]{ // static prefix; RoPE/position and KV work stay outside
+#ifdef STRATA_FORK_WARM
+        if(fuse_small()) {
+            k4::hipfuse::Hc p{d.h,l.hca_fn,l.hca_scale,l.hca_base,d.pre,l.attn_norm,
+                d.mix,d.a_pre,d.a_post,d.a_comb,d.x,hccnt_,D,H,(2+H)*H,g.sinkhorn,g.eps,g.hc_eps};
+            dense_launch("hipfuse::hc_pre",[&]{k4::hipfuse::hc_pre(p,s);});
+        } else
+#endif
+        {
         dense_launch("k4::hc_mix_split",[&]{return k4::hc_mix_split(d.h, l.hca_fn, H * D, (2 + H) * H, T, g.eps, d.mix, hccnt_, l.hca_scale, l.hca_base, H,
                          g.sinkhorn, g.hc_eps, d.a_pre, d.a_post, d.a_comb, s);});
         dump("a_mix", il, p0, T, d.mix, kMixStride * 4); dump("a_pre", il, p0, T, d.a_pre, kPreStride * 4);
         dump("a_post", il, p0, T, d.a_post, kPreStride * 4); dump("a_comb", il, p0, T, d.a_comb, kCombStride * 4);
         dense_launch("k4::hc_pre_norm",[&]{return k4::hc_pre_norm(d.h, d.pre, l.attn_norm, D, H, T, g.eps, d.x, s);});
+        }
         dump("pre_in", il, p0, T, d.pre, kPreStride * 4); dump("attn_x", il, p0, T, d.x, size_t(D) * 4);
         {
             x3::MvJob j[4]; int nj = 0;
@@ -407,13 +502,21 @@ class HipStage final : public stage::Backend
         });
         { k4::Finish f; f.rd = g.rd; f.pos = int(p0); f.vpp = NHL; f.freqs = freqs; dense_launch("k4::finish",[&]{return k4::finish(d.q, T * NHL, HD, HD, f, s);}); }
         dump("q", il, p0, T, d.q, size_t(HQ) * 4);
+        if(!fuse_small()) {
         dense_launch("k4::ring_to_ext",[&]{return k4::ring_to_ext(l.win, d.ext, p0, g.win, HD, s);});
+        }
         {
             k4::Finish f; f.w = l.kv_norm; f.eps = g.eps; f.rd = g.rd; f.pos = int(p0); f.freqs = freqs; f.quant = 1;
             f.dst = d.ext + size_t(g.win) * size_t(HD); f.dst_stride = HD;
             dense_launch("k4::finish",[&]{return k4::finish(d.kvr, T, HD, HD, f, s);});
         }
+#ifdef STRATA_FORK_WARM
+        if(fuse_small())dense_launch("hipfuse::ring",[&]{k4::hipfuse::ring(l.win,d.ext,p0,g.win,HD,s);});
+        else
+#endif
+        {
         dense_launch("k4::ext_to_ring",[&]{return k4::ext_to_ring(d.ext, l.win, p0, g.win, T, HD, s, nullptr);});
+        }
         dump("ext", il, p0, T, d.ext, (size_t(g.win) + T) * size_t(HD) * 2);
         k4::AttnRows ar;
         {
@@ -482,10 +585,19 @@ class HipStage final : public stage::Backend
             ar.nsel[0] = lim.n[0] > 0 ? planner_.topk[il] : 0;
             ckv = sr.ckv;
         }
+#ifdef STRATA_FORK_WARM
+        k4::Finish af; af.rd=g.rd;af.pos=int(p0);af.vpp=NHL;af.freqs=freqs;af.inverse=1;af.quant=1;
+        if(fuse_attention())dense_launch("hipfuse::attention_finish",[&]{k4::hipfuse::attention(d.q,d.ext,ckv,d.topk,
+            int(g.topk_stride()),ar,l.sink,NHL,HD,1.0f/std::sqrt(float(HD)),d.o,attn_scr_,
+            fuse_scores_,fuse_score_stride_,s,&af);});
+        else
+#endif
+        {
         dense_launch("k4::sparse_attn",[&]{return k4::sparse_attn(d.q, d.ext, ckv, d.topk, int(g.topk_stride()), ar, l.sink, NHL, HD, T, 1.0f / std::sqrt(float(HD)),
                         d.o, s, k4::kKvFp4, 0, &attn_scr_);});
+        }
         dump("o", il, p0, T, d.o, size_t(HQ) * 4);
-        { k4::Finish fo; fo.rd = g.rd; fo.pos = int(p0); fo.vpp = NHL; fo.freqs = freqs; fo.inverse = 1; fo.quant = 1;
+        if(!fuse_attention()) { k4::Finish fo; fo.rd = g.rd; fo.pos = int(p0); fo.vpp = NHL; fo.freqs = freqs; fo.inverse = 1; fo.quant = 1;
           dense_launch("k4::finish",[&]{return k4::finish(d.o, T * NHL, HD, HD, fo, s);}); }
         dump("o_fin", il, p0, T, d.o, size_t(HQ) * 4);
         dense_group(il,1,[&]{
@@ -504,19 +616,50 @@ class HipStage final : public stage::Backend
         std::swap(d.h, d.h2);
         dump("h_attn", il, p0, T, d.h, size_t(H) * size_t(D) * 4);
         dense_group(il,2,[&]{ // static FFN; host route readbacks stay outside
+#ifdef STRATA_FORK_WARM
+        if(fuse_small()) {
+            k4::hipfuse::Hc p{d.h,l.hcf_fn,l.hcf_scale,l.hcf_base,d.a_pre,l.ffn_norm,
+                d.mix,d.f_pre,d.f_post,d.f_comb,d.x,hccnt_,D,H,(2+H)*H,g.sinkhorn,g.eps,g.hc_eps};
+            dense_launch("hipfuse::hc_pre",[&]{k4::hipfuse::hc_pre(p,s);});
+        } else
+#endif
+        {
         dense_launch("k4::hc_mix_split",[&]{return k4::hc_mix_split(d.h, l.hcf_fn, H * D, (2 + H) * H, T, g.eps, d.mix, hccnt_, l.hcf_scale, l.hcf_base, H,
                          g.sinkhorn, g.hc_eps, d.f_pre, d.f_post, d.f_comb, s);});
         dense_launch("k4::hc_pre_norm",[&]{return k4::hc_pre_norm(d.h, d.a_pre, l.ffn_norm, D, H, T, g.eps, d.x, s);});
+        }
         dump("f_pre", il, p0, T, d.f_pre, kPreStride * 4); dump("f_post", il, p0, T, d.f_post, kPreStride * 4);
         dump("f_comb", il, p0, T, d.f_comb, kCombStride * 4); dump("ffn_x", il, p0, T, d.x, size_t(D) * 4);
         // ---- synchronous host-routed MoE (ds4_model.cu:10414-10571)
+#ifdef STRATA_FORK_WARM
+        if(fuse_small())dense_launch("hipfuse::router",[&]{k4::hipfuse::router(l.gate_w,d.x,l.gate_bias,
+            g.n_exp,D,g.k_exp,g.route_scale,d.glog,d.ridx,d.rw,hccnt_,s);});
+        else
+#endif
+        {
         dense_launch("k4::gemv_f32",[&]{return k4::gemv_f32(l.gate_w, d.x, g.n_exp, D, T, d.glog, kGlogStride, s);});
         dense_launch("k4::route",[&]{return k4::route(d.glog, l.gate_bias, g.n_exp, g.k_exp, T, g.route_scale, d.ridx, d.rw, s);});
+        }
         });
         int h_idx[kPicks]; float h_w[kPicks];
+#ifdef STRATA_FORK_WARM
+        const bool early=cfg_.warm_expert_issue=="early-v1";
+        const bool trace_issue=uint64_t(p0)<cfg_.warm_expert_timeline_limit;
+        HipExpertIssue* issue=nullptr;
+        if(early||trace_issue){
+            if(!expert_issue_)expert_issue_=std::make_unique<HipExpertIssue>();
+            issue=expert_issue_.get();issue->begin(s_,request_,p0,il,trace_issue,early);
+        }
+        // Declared after host route arrays: drains readbacks/callbacks before
+        // these stack owners disappear on every exception path.
+        HipIssueGuard issue_guard{issue};
+#endif
         CK(hipMemcpyAsync(h_idx, d.ridx, kPicks * 4, hipMemcpyDeviceToHost, s));
         CK(hipMemcpyAsync(h_w, d.rw, kPicks * 4, hipMemcpyDeviceToHost, s));
         CK(hipMemcpyAsync(h_x_.data(), d.x, size_t(D) * 4, hipMemcpyDeviceToHost, s));
+#ifdef STRATA_FORK_WARM
+        if(issue)issue->route();
+#endif
         dense_group(il,3,[&]{
         dense_launch("mv",[&]{return mv({job(l.s1, d.x, d.sg, T, D, g.ff), job(l.s3, d.x, d.su, T, D, g.ff)});});
         dense_launch("k4::swiglu",[&]{return k4::swiglu(d.sg, d.su, T * g.ff, g.lim, d.sh, s);});
@@ -525,14 +668,28 @@ class HipStage final : public stage::Backend
         events_.end(s_);
 #ifdef STRATA_FORK_WARM
         const bool queued=cfg_.warm_hip_schedule=="queued-v1";
-        if(queued){
+        if(issue)issue->shared(); // completion of shared compute, before its host copy
+        if(queued&&!early){
             CK(hipMemcpyAsync(h_shared_.data(),d.sh_out,size_t(D)*4,hipMemcpyDeviceToHost,s));
             if(cfg_.warm_measure)warm_dense_->mark_end(s_);
         }
 #endif
+#ifdef STRATA_FORK_WARM
+        auto finish_shared=[&]{
+            if(queued&&early){
+                // A pageable D2H can block the submitting host. Enqueue it only
+                // after CPU/B65 have been submitted, even when the API is Async.
+                CK(hipMemcpyAsync(h_shared_.data(),d.sh_out,size_t(D)*4,hipMemcpyDeviceToHost,s));
+                if(cfg_.warm_measure)warm_dense_->mark_end(s_);
+            }
+#endif
         sync();
 #ifdef STRATA_FORK_WARM
+        if(issue)issue->completed();
+#endif
+#ifdef STRATA_FORK_WARM
         dense_trace_.collect("hip");
+        route_capture_.record(uint32_t(p0),uint32_t(il),uint32_t(g.nl),std::span(h_idx,size_t(g.k_exp)),std::span(h_w,size_t(g.k_exp)));
 #endif
         dump("glog", il, p0, T, d.glog, kGlogStride * 4);
         if (dump_.on(il, "ridx")) dump_.write("ridx", il, uint64_t(p0), T, h_idx, sizeof(h_idx));
@@ -542,15 +699,23 @@ class HipStage final : public stage::Backend
         if(cfg_.warm_measure){if(queued)warm_dense_->collect(il);else warm_dense_->end(il,s_);}
 #endif
 #ifdef STRATA_FORK_WARM
+        };
+        if(early)issue->wait_route();else finish_shared();
         if(cfg_.warm_experts){
             if(queued){
-                h_part_=warm_execute(*cpu_,il,std::span(h_idx,size_t(g.k_exp)),std::span(h_w,size_t(g.k_exp)),h_x_,h_shared_);
-                CK(hipMemcpyAsync(d.moe_out,h_part_.data(),h_part_.size()*4,hipMemcpyHostToDevice,s));
+                h_part_=warm_execute(*cpu_,il,std::span(h_idx,size_t(g.k_exp)),std::span(h_w,size_t(g.k_exp)),h_x_,h_shared_,
+                    early?std::function<void()>(finish_shared):std::function<void()>{},issue?&issue->timeline:nullptr);
+                if(early)++expert_issue_calls_;
+                strata_warm_host_partition_v1()->enter(HostPart::completion);
+                {HostScope h2d(strata_warm_host_partition_v1(),HostPart::result_h2d);
+                CK(hipMemcpyAsync(d.moe_out,h_part_.data(),h_part_.size()*4,hipMemcpyHostToDevice,s));}
                 // Final layer sync retains this host owner through H2D + hc_post.
             }else{
                 std::vector<float> shared(static_cast<size_t>(D));CK(hipMemcpyAsync(shared.data(),d.sh_out,size_t(D)*4,hipMemcpyDeviceToHost,s));sync();
                 auto combined=warm_execute(*cpu_,il,std::span(h_idx,size_t(g.k_exp)),std::span(h_w,size_t(g.k_exp)),h_x_,shared);
-                CK(hipMemcpyAsync(d.moe_out,combined.data(),combined.size()*4,hipMemcpyHostToDevice,s));sync();
+                strata_warm_host_partition_v1()->enter(HostPart::completion);
+                {HostScope h2d(strata_warm_host_partition_v1(),HostPart::result_h2d);
+                CK(hipMemcpyAsync(d.moe_out,combined.data(),combined.size()*4,hipMemcpyHostToDevice,s));sync();}
             }
             events_.begin(DecodePart::other,s_);
         }else
@@ -614,7 +779,12 @@ class HipStage final : public stage::Backend
         dump("h_out", il, p0, T, d.h, size_t(H) * size_t(D) * 4);
         CK(hipMemcpyAsync(d.pre, d.f_pre, size_t(T) * kPreStride * 4, hipMemcpyDeviceToDevice, s));
         events_.end(s_);
+        {
+#ifdef STRATA_FORK_WARM
+        HostScope wait(strata_warm_host_partition_v1(),HostPart::ffn_wait);
+#endif
         sync();  // h_part_/h_x_ are reused by the next layer
+        }
     }
     unsigned* hccnt_ = nullptr;
     k4::AttnScratch attn_scr_{};
@@ -726,10 +896,29 @@ public:
         // Upstream forward(): pos + T <= max_context (ds4_model.cu:9705), before ANY state change or submit.
         require(t.position < uint64_t(cfg_.max_context), "the context is full (position >= max_context)");
         require(t.id >= 0 && t.id < g_.vocab, "token out of range");
+#ifdef STRATA_FORK_WARM
+        if (cfg_.warm_engram=="read-ahead-v1" && !engram_reads_ && g_.eg_nlayers) {
+            engram_reads_=std::make_unique<EngramReadAhead>(size_t(g_.eg_nlayers),size_t(g_.eg_cols()),
+                size_t(g_.eg_cols())*size_t(g_.eg_hd+g_.eg_hd/32),
+                [this](int li,std::span<const uint64_t> ids,std::span<std::byte> dst){ws_->engram_rows(li,ids,dst);});
+        }
+        EngramReadAhead::TokenGuard engram_guard{engram_reads_.get()};
+        require(!cancel.load(std::memory_order_acquire), "request cancelled");
+        if (engram_reads_) for (const auto& l : L_) if (l.role.eg >= 0)
+            engram_reads_->issue(l.role.eg,engram_slice(plan_,t,l.role.il));
+#endif
+        {
+#ifdef STRATA_FORK_WARM
+        HostScope planner(strata_warm_host_partition_v1(),HostPart::planner);
+#endif
         CK(hipSetDevice(dev_));
         if(r_.prefix())timing_begin(t); // tail already started at its H2D import
         planner_.advance(g_, topo_, t.position);
+        }
         if (r_.prefix()) {
+#ifdef STRATA_FORK_WARM
+            HostScope host_embedding(strata_warm_host_partition_v1(),HostPart::embedding);
+#endif
             events_.begin(DecodePart::other,s_);
             std::vector<uint16_t> row(size_t(g_.dim));
             timing_.host(timing_.embedding_read_ns,[&]{ws_->embedding_bf16(t.id, row);});
@@ -746,6 +935,7 @@ public:
         if (tail(r_, g_)) {  // head_rows_dev + head_share for one row on a whole head (nm == 1)
             events_.begin(DecodePart::other,s_);
 #ifdef STRATA_FORK_WARM
+            strata_warm_host_partition_v1()->enter(HostPart::head);
             dense_trace_.begin(cfg_.warm_kernel_timing,t.request,uint32_t(g_.nl),t.position);
             if(cfg_.warm_measure)warm_dense_->begin(s_);
 #endif
@@ -797,6 +987,9 @@ public:
         return std::make_unique<Done>(host.size());
     }
     std::vector<float> logits(const stage::Token& t) override {
+#ifdef STRATA_FORK_WARM
+        HostScope readback(strata_warm_host_partition_v1(),HostPart::readback);
+#endif
         require(valid_ && tail(r_, g_) && executed_step_ == t.step, "logits only on the executed tail");
         std::vector<float> out(size_t(g_.vocab));
         events_.begin(DecodePart::other,s_);
@@ -814,11 +1007,29 @@ public:
         residents_.expert(l,residency_.slot(l,e),d_.x,d_.ed,g_,s_);
         std::vector<float> y(x.size());CK(hipMemcpyAsync(y.data(),d_.ed,y.size()*4,hipMemcpyDeviceToHost,s_));warm_expert_clock_->end(s_);warm_gpu_span(true,l,warm_expert_clock_->elapsed_ns());return y;
     }
+    bool warm_grouped()const override{return cfg_.warm_hip_experts!="serial-v1";}
+    std::vector<std::vector<float>> warm_compute_many(uint32_t l,std::span<const int> ids,std::span<const float> x)override{
+        require(warm_grouped() && !ids.empty() && ids.size()<=size_t(g_.k_exp) && x.size()==size_t(g_.dim),"warm HIP batch request extent");
+        std::vector<int> slots;slots.reserve(ids.size());
+        for(int id:ids){require(warm_contains(l,id),"warm HIP batch nonresident selection");slots.push_back(residency_.slot(l,id));}
+        CK(hipSetDevice(dev_));
+        if(!warm_expert_clock_)warm_expert_clock_=std::make_unique<HipDecodeClock>();
+        try{
+            warm_expert_clock_->begin(s_);
+            residents_.enqueue_layer(l,slots,x,g_,s_);
+            warm_expert_clock_->end(s_); // one completion wait, after the whole layer's D2H
+            warm_gpu_span(true,l,warm_expert_clock_->elapsed_ns());
+        }catch(...){hipStreamSynchronize(s_);throw;} // host transfer owners remain in residents_ even if drain fails
+        auto flat=residents_.layer_output();std::vector<std::vector<float>> rows;rows.reserve(ids.size());
+        for(size_t i=0;i<ids.size();++i)rows.emplace_back(flat.begin()+i*x.size(),flat.begin()+(i+1)*x.size());
+        return rows;
+    }
     int32_t sample(float temperature,float top_p,int top_k,float min_p,uint64_t seed,uint64_t counter)override{
         require(valid_&&tail(r_,g_)&&cfg_.warm_experts,"warm sample requires valid warm HIP tail");
         strata::dsv41k::SamplerParams params;params.temperature=temperature;params.greedy=temperature<=0;
         params.top_p=top_p;params.top_k=top_k;params.min_p=min_p;params.seed=seed;params.counter=counter;
         strata::dsv41k::sample_tokens(d_.logits,1,g_.vocab,nullptr,0,params,d_.sample_token,s_);
+        HostScope readback(strata_warm_host_partition_v1(),HostPart::sample_readback);
         int out=-1;CK(hipMemcpyAsync(&out,d_.sample_token,sizeof(int),hipMemcpyDeviceToHost,s_));sync();
         require(out>=0&&out<g_.vocab,"sampled token outside vocabulary");return out;
     }

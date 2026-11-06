@@ -41,7 +41,8 @@ def test_native_timing_branch_compiles_and_requires_pack(tmp_path):
     result=run(binary);assert result.returncode==1 and 'native MMVQ timing requires real pack' in result.stderr,result.stdout+result.stderr
 
 
-def test_opt_in_config_and_real_bank(tmp_path):
+@pytest.mark.parametrize("candidate",["mmvq-soa-v1","mmvq-soa-v2"])
+def test_opt_in_config_and_real_bank(tmp_path,candidate):
     source=(HERE/'grouped_bank_test.cpp').read_text()
     source=source.replace('#include "sycl_bank.hpp"','#include "sycl_bank.hpp"\n#include "mmvq_metrics.hpp"')
     source=source.replace('cfg.warm_sycl_experts=mode==2?', 'cfg.warm_sycl_experts=mode==3?"mmvq-soa-v1":mode==2?')
@@ -49,6 +50,9 @@ def test_opt_in_config_and_real_bank(tmp_path):
     source=source.replace('exercise(0);exercise(1);exercise(2);','exercise(0);exercise(3);')
     # Direct serial entry must never interpret SoA as raw AoS.
     source=source.replace('size_t case_number=0;', 'size_t case_number=0; if(mode==3){auto direct=bank->device(0,5,x);auto* redirect=dynamic_cast<WarmRedirect*>(bank.get());auto batch=redirect->warm_compute_many(0,std::array<int,1>{5},x);assert(direct==batch.at(0));}')
+    source=source.replace('mmvq-soa-v1',candidate)
+    if candidate in ('mmvq-soa-v2','mmvq-soa-v3'):
+        source=source.replace('else if(mode==3)assert(mmvq::metrics(out,baseline[case_number]).expert_ok());','')
     p=tmp_path/'bank.cpp';p.write_text(source)
     inc=ROOT/'engine/strata/fixtures/warm-store'
     binary=tmp_path/'bank';build(binary,p,[HERE/'sycl_bank.cpp',HERE/'runtime.cpp',ROOT/'engine/strata/sycl/moe/row2.cpp'],['-I'+str(inc),'-I'+str(HERE)])
@@ -96,6 +100,7 @@ def test_wrong_selected_expert_is_rejected_by_numeric_gate(tmp_path):
     header=(HERE/'mmvq_project.hpp').read_text()
     assert header.count('expert=GateUp?part/2:part;')==1
     (overlay/'mmvq_project.hpp').write_text(header.replace('expert=GateUp?part/2:part;','expert=0;'))
+    (overlay/'mmvq_v3.hpp').write_text((HERE/'mmvq_v3.hpp').read_text())
     (overlay/'mmvq_check.hpp').write_text((HERE/'mmvq_check.hpp').read_text())
     source=overlay/'expert_check.cpp';source.write_text((HERE/'expert_check.cpp').read_text())
     binary=tmp_path/'mutated';build(binary,source,primitives(),['-DSTRATA_EXPERT_MMVQ=1','-iquote',str(HERE)])

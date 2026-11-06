@@ -13,6 +13,10 @@
 #include <unordered_map>
 #include <atomic>
 #include <chrono>
+#include "../../../warm/engram_cache.hpp"
+#include "../../../warm/engram_parallel.hpp"
+#include "../../../warm/engram_file_control.hpp"
+#include "../../../warm/engram_residency.hpp"
 
 namespace strata::wiring {
 namespace {
@@ -55,6 +59,14 @@ class PackSource final : public WeightSource {
     ModelMeta g_;
     PackOptions opt_;
     mutable std::atomic<uint64_t> io_count_[4]{},io_bytes_[4]{},io_ns_[4]{};
+    // Only the stage reading a table materializes its lazy anonymous arena.
+    // Budget is per WeightSource; native cut0 has one reader source (HIP).
+    std::vector<std::unique_ptr<EngramCache>> eg_cache_;
+    unsigned eg_qd_=0;
+    mutable std::unique_ptr<EngramParallel> eg_pool_;
+    mutable std::once_flag eg_pool_once_;
+    std::vector<std::unique_ptr<Fd>> eg_fds_;
+    std::vector<std::unique_ptr<EngramResidency>> eg_pages_,eg_scale_pages_;
 
     std::string str(const std::string& k, const std::string& def = "") const {
         auto it = kv_.find(k); return it == kv_.end() ? def : it->second;
@@ -171,11 +183,69 @@ public:
         }
         geo();
         engram();
+        eg_qd_=unsigned(engram_env("AIOPT_ENGRAM_QD",16));
+        const auto random=engram_env("AIOPT_ENGRAM_RANDOM",1);
+        const auto extents=engram_env("AIOPT_ENGRAM_EXTENTS",1);
+        if(random||extents) {
+            eg_fds_.resize(fds_.size());
+            for(const auto& name:names())if(name.find(".engram.embed.")!=std::string::npos) {
+                const auto& t=t_.at(name);auto& fd=eg_fds_.at(size_t(t.file));
+                if(!fd) {
+                    fd=std::make_unique<Fd>(model_dir_+"/"+files_.at(size_t(t.file)));
+                    if(random)engram_advice(fd->fd,POSIX_FADV_RANDOM);
+                }
+                if(extents) {
+                    const auto start=engram_now_ns();auto n=engram_extents(fd->fd,t.offset,t.bytes);
+                    std::fprintf(stderr,"AIOPT_ENGRAM_EXTENTS tensor=%s count=%llu ns=%llu\n",name.c_str(),(unsigned long long)n,(unsigned long long)(engram_now_ns()-start));
+                }
+            }
+        }
+        const auto budget=engram_env("AIOPT_ENGRAM_CACHE_BYTES",256ULL<<20);
+        const auto diagnostic=engram_env("AIOPT_ENGRAM_CACHE_DIAG",2);
+        if(budget || diagnostic) {
+            for(int li=0;li<g_.eg_nlayers;++li) {
+                const size_t hd=size_t(g_.eg_hd);const int fmt=eg_fmt_.at(size_t(li));
+                require(fmt>=0,"Engram cache unsupported format");
+                const size_t bytes=fmt==0?hd/32*33:fmt==1?hd/256*210:fmt==2?hd/32*18:hd+hd/32;
+                eg_cache_.push_back(std::make_unique<EngramCache>(budget/size_t(g_.eg_nlayers),bytes));
+                if(diagnostic==2) {
+                    const auto P=layer_prefix(uint32_t(g_.eg_layers[size_t(li)]))+"engram.embed.";
+                    const auto t=require_tensor(P+"weight");
+                    eg_pages_.push_back(std::make_unique<EngramResidency>(fds_.at(size_t(t.file))->fd,t.offset,t.bytes));
+                    if(fmt==3) {
+                        const auto s=require_tensor(P+"scale");
+                        eg_scale_pages_.push_back(std::make_unique<EngramResidency>(fds_.at(size_t(s.file))->fd,s.offset,s.bytes));
+                    }else eg_scale_pages_.push_back(nullptr);
+                }
+            }
+        }
         id += ":" + std::to_string(fnv(slurp(d + "/engram.bin")));
         identity_ = id;
     }
     const ModelMeta& meta() const override { return g_; }
     ~PackSource() override {
+        if(eg_pool_) {
+            eg_pool_->drain();
+            if(eg_pool_->calls)std::fprintf(stderr,"AIOPT_ENGRAM_PARALLEL {\"qd\":%u,\"calls\":%llu,\"rows\":%llu,\"peak\":%u,\"worker_cpu_ns\":%llu}\n",eg_qd_,(unsigned long long)eg_pool_->calls.load(),(unsigned long long)eg_pool_->rows.load(),eg_pool_->peak.load(),(unsigned long long)eg_pool_->worker_cpu_ns.load());
+        }
+        for(size_t li=0;li<eg_cache_.size();++li) {
+            const auto& cache=*eg_cache_[li];const auto& s=cache.stats;
+            // Sources used solely for metadata/experts have no rows or RSS: do not
+            // claim their reserved address space as an active table cache.
+            if(!s.hits && !s.misses) continue;
+            std::fprintf(stderr,"AIOPT_ENGRAM_CACHE {\"schema\":\"engram-cache-v1\",\"scope\":\"source-lifetime\",\"layer\":%d,\"arena_bytes\":%zu,\"capacity_rows\":%zu,\"hits\":%llu,\"misses\":%llu,\"logical_bytes\":%llu,\"pread_bytes\":%llu,\"wait_ns\":%llu,\"pread_ns\":%llu,\"errors\":%llu,\"evictions\":%llu}\n",
+                g_.eg_layers[li],cache.allocated_bytes(),cache.capacity_rows(),
+                (unsigned long long)s.hits,(unsigned long long)s.misses,(unsigned long long)s.bytes,
+                (unsigned long long)s.read_bytes,(unsigned long long)s.wait_ns,(unsigned long long)s.read_ns,
+                (unsigned long long)s.errors,(unsigned long long)s.evictions);
+            if(!eg_pages_.empty()) {
+                const auto& p=*eg_pages_[li];const auto* scale=eg_scale_pages_[li].get();
+                std::fprintf(stderr,"AIOPT_ENGRAM_RESIDENCY {\"schema\":\"engram-residency-v1\",\"layer\":%d,\"scope\":\"source-lifetime-pread-attempts\",\"resident_rows\":%llu,\"nonresident_rows\":%llu,\"errors\":%llu,\"scale_resident_rows\":%llu,\"scale_nonresident_rows\":%llu,\"scale_errors\":%llu,\"resident_pread_ns\":%llu,\"nonresident_pread_ns\":%llu}\n",
+                    g_.eg_layers[li],(unsigned long long)p.resident.load(),(unsigned long long)p.nonresident.load(),(unsigned long long)p.errors.load(),
+                    (unsigned long long)(scale?scale->resident.load():0),(unsigned long long)(scale?scale->nonresident.load():0),(unsigned long long)(scale?scale->errors.load():0),
+                    (unsigned long long)p.pread_ns[1].load(),(unsigned long long)p.pread_ns[0].load());
+            }
+        }
         if(opt_.io_timing) {
             const char* names[]={"expert","engram","embedding","other_including_load"};
             for(int i=0;i<4;++i) std::fprintf(stderr,"AIOPT_PACK_IO {\"schema\":\"pack-io-v1\",\"role\":\"%s\",\"scope\":\"source-lifetime\",\"calls\":%llu,\"logical_bytes\":%llu,\"pread_wall_ns\":%llu}\n",names[i],(unsigned long long)io_count_[i].load(),(unsigned long long)io_bytes_[i].load(),(unsigned long long)io_ns_[i].load());
@@ -199,15 +269,17 @@ public:
     void read(std::string_view name, uint64_t off, std::span<std::byte> dst) const override {
         const auto& t = t_.at(std::string(name));
         require(off <= t.bytes && dst.size() <= t.bytes - off, "read past tensor end");
-        if(!opt_.io_timing){pread_full(fds_[size_t(t.file)]->fd, dst.data(), dst.size(), t.offset + off);return;}
+        const int fd=(!eg_fds_.empty() && eg_fds_[size_t(t.file)] && name.find(".engram.embed.")!=std::string_view::npos)?eg_fds_[size_t(t.file)]->fd:fds_[size_t(t.file)]->fd;
+        if(!opt_.io_timing){pread_full(fd, dst.data(), dst.size(), t.offset + off);return;}
         const int role=name.find(".ffn.experts.")!=std::string_view::npos?0:name.find(".engram.embed.")!=std::string_view::npos?1:name=="embed.weight"?2:3;
         const auto begin=std::chrono::steady_clock::now();
-        pread_full(fds_[size_t(t.file)]->fd, dst.data(), dst.size(), t.offset + off);
+        pread_full(fd, dst.data(), dst.size(), t.offset + off);
         io_count_[role].fetch_add(1);io_bytes_[role].fetch_add(dst.size());
         io_ns_[role].fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-begin).count()));
     }
     int engram_format(int li) const override { return eg_fmt_.at(size_t(li)); }
     void engram_rows(int li, std::span<const uint64_t> ids, std::span<std::byte> dst) const override {
+        if(eg_qd_>1)std::call_once(eg_pool_once_,[&]{eg_pool_=std::make_unique<EngramParallel>(eg_qd_);});
         const int cols = g_.eg_cols(), hd = g_.eg_hd, fmt = engram_format(li);
         require(fmt >= 0, "Engram table format not admitted");
         require(ids.size() == size_t(cols) && dst.size() == size_t(cols) * size_t(hd + hd / 32), "Engram row extent");
@@ -215,11 +287,22 @@ public:
         const TensorInfo tw = require_tensor(P + "weight");
         std::byte* rows = dst.data();
         std::byte* scales = rows + size_t(cols) * size_t(hd);
-        std::vector<std::byte> blk;
-        for (int c = 0; c < cols; ++c) {
+        auto packed_read=[&](uint64_t id,size_t n,std::span<std::byte> out) {
+            require(n && id<tw.bytes/n,"Engram row past tensor end");
+            auto loader=[&](std::span<std::byte> to){
+                if(!eg_pages_.empty())eg_pages_.at(size_t(li))->read(id*n,n,[&]{read(tw.name,id*n,to);});
+                else read(tw.name,id*n,to);
+            };
+            if(eg_cache_.empty()) loader(out);
+            else eg_cache_.at(size_t(li))->read(id,out,loader,bool(eg_pool_));
+        };
+        std::vector<std::byte> serial_blk;
+        auto row=[&](size_t c) {
+            std::vector<std::byte> local_blk;
+            auto& blk=eg_pool_?local_blk:serial_blk;
             std::byte* rd = rows + size_t(c) * size_t(hd);
             std::byte* sd = scales + size_t(c) * size_t(hd / 32);
-            if (ids[size_t(c)] == UINT64_MAX) { std::memset(rd, 0, size_t(hd)); std::memset(sd, 0, size_t(hd / 32)); continue; }
+            if (ids[size_t(c)] == UINT64_MAX) { std::memset(rd, 0, size_t(hd)); std::memset(sd, 0, size_t(hd / 32)); return; }
             const uint64_t id = ids[size_t(c)];
             if (fmt == 0) {
                 // ds4_model.cu:6335-6338 reads hd/32*33 bytes per row; ds4_engram_io.hpp:93 (retained at
@@ -227,7 +310,7 @@ public:
                 // eg_rows (codes) and eg_x (dequantized) against DS4_DUMP_S.
                 const size_t n = size_t(hd / 32) * 33;
                 blk.resize(n);
-                read(tw.name, id * n, blk);
+                packed_read(id,n,blk);
                 for (int b = 0; b < hd / 32; ++b) {
                     sd[b] = blk[size_t(b) * 33];
                     std::memcpy(rd + size_t(b) * 32, blk.data() + size_t(b) * 33 + 1, 32);
@@ -235,12 +318,29 @@ public:
             } else if (fmt == 1 || fmt == 2) {  // codes into the row's hd bytes; scale bytes unused (left zero)
                 const size_t n = fmt == 1 ? size_t(hd / 256) * 210 : size_t(hd / 32) * 18;
                 std::memset(rd, 0, size_t(hd)); std::memset(sd, 0, size_t(hd / 32));
-                read(tw.name, id * n, std::span(rd, n));
+                packed_read(id,n,std::span(rd,n));
             } else {  // fmt 3: codes and a separate scale tensor
-                read(tw.name, id * uint64_t(hd), std::span(rd, size_t(hd)));
-                read(P + "scale", id * uint64_t(hd / 32), std::span(sd, size_t(hd / 32)));
+                if(eg_cache_.empty()) {
+                    read(tw.name, id * uint64_t(hd), std::span(rd, size_t(hd)));
+                    read(P + "scale", id * uint64_t(hd / 32), std::span(sd, size_t(hd / 32)));
+                } else {
+                    require(id<tw.bytes/uint64_t(hd),"Engram row past tensor end");
+                    blk.resize(size_t(hd+hd/32));
+                    eg_cache_.at(size_t(li))->read(id,blk,[&](std::span<std::byte> to){
+                        if(!eg_pages_.empty()) {
+                            eg_pages_.at(size_t(li))->read(id*uint64_t(hd),size_t(hd),[&]{read(tw.name,id*uint64_t(hd),to.first(size_t(hd)));});
+                            eg_scale_pages_.at(size_t(li))->read(id*uint64_t(hd/32),size_t(hd/32),[&]{read(P+"scale",id*uint64_t(hd/32),to.subspan(size_t(hd)));});
+                        }else {
+                            read(tw.name,id*uint64_t(hd),to.first(size_t(hd)));
+                            read(P+"scale",id*uint64_t(hd/32),to.subspan(size_t(hd)));
+                        }
+                    },bool(eg_pool_));
+                    std::memcpy(rd,blk.data(),size_t(hd));std::memcpy(sd,blk.data()+hd,size_t(hd/32));
+                }
             }
-        }
+        };
+        if(eg_pool_)eg_pool_->run(size_t(cols),row);
+        else for(int c=0;c<cols;++c)row(size_t(c));
     }
     void embedding_bf16(int32_t token, std::span<uint16_t> dst) const override {
         const TensorInfo t = require_tensor("embed.weight");

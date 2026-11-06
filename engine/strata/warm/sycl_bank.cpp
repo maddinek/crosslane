@@ -1,6 +1,7 @@
 // MIT. One complementary B65 slab, immutable after upload; shared CPU DSO seam.
 #include "sycl_bank.hpp"
 #include "runtime.hpp"
+#include "activation_capture.hpp"
 #include "../sycl/stage/wiring/sycl_decode_events.hpp"
 #include "../sycl/moe/core.hpp"
 #include "../sycl/moe/moe.hpp"
@@ -8,7 +9,7 @@
 #define STRATA_WARM_PACKED
 #include "packed_project.hpp"
 #include "grouped_project.hpp"
-#include "mmvq_project.hpp"
+#include "mmvq_v3.hpp"
 #include <chrono>
 namespace strata::wiring {
 namespace {
@@ -20,8 +21,9 @@ class Bank final:public r::ExpertCompute,public WarmRedirect {
  uint16_t* table2=nullptr;uint16_t* table1=nullptr;uint16_t* tablexs=nullptr;
  std::vector<std::vector<std::array<r::DenseMat,3>>> matrices;
  std::unique_ptr<WarmGroupedWorkspace> grouped;
- bool soa=false;uint32_t* mmvq_table=nullptr;
+ bool soa=false,exact_order=false,low_n=false;uint32_t* mmvq_table=nullptr;
  uint64_t workspace_bytes=0;SyclDecodeClock clock;
+ ActivationCapture capture;
  void clear()noexcept{warm_unregister(this);try{q.wait_and_throw();}catch(...){}
   for(void* p:{static_cast<void*>(slab),static_cast<void*>(work),static_cast<void*>(quant),static_cast<void*>(scales),static_cast<void*>(table2),static_cast<void*>(table1),static_cast<void*>(tablexs)})if(p)try{sycl::free(p,q);}catch(...){}
   if(mmvq_table){try{sycl::free(mmvq_table,q);}catch(...){}mmvq_table=nullptr;}
@@ -35,11 +37,13 @@ class Bank final:public r::ExpertCompute,public WarmRedirect {
  }
 public:
  Bank(sycl::queue& queue,const WeightSource& source,uint32_t f,uint32_t e,const Config& cfg,const WarmResidency& p)
-  :q(queue),ws(source),plan(p),first(f),end(e),packed_gu(cfg.warm_packed_gu){
+  :q(queue),ws(source),plan(p),first(f),end(e),packed_gu(cfg.warm_packed_gu),capture(uint32_t(source.meta().nl),uint32_t(source.meta().dim)){
   require(cfg.warm_experts&&first==0&&(end>=1||cfg.warm_dense_owner=="hip-v1"),"warm B65 bank requires cut1 prefix");
   if(first<end)fallback=r::make_experts(q,ws,first,end,cfg.expert_placement,cfg.cpu_threads,cfg.cpu_dispatch,cfg.cpu_timing);
   try{
-   soa=cfg.warm_sycl_experts=="mmvq-soa-v1";
+   low_n=cfg.warm_sycl_experts=="mmvq-soa-v3";
+   exact_order=low_n||cfg.warm_sycl_experts=="mmvq-soa-v2";
+   soa=exact_order||cfg.warm_sycl_experts=="mmvq-soa-v1";
    const auto& g=ws.meta();const size_t maxk=size_t(std::max(g.dim,g.ff));
    slab=sycl::malloc_device<uint8_t>(size_t(plan.allocated),q);
    work=sycl::malloc_device<float>(size_t(g.dim)*2+size_t(g.ff)*3,q);
@@ -74,7 +78,7 @@ public:
     require(a[0].dtype==a[1].dtype&&a[0].dtype==layer[0][0].dtype&&a[2].dtype==layer[0][2].dtype,"grouped bank requires uniform layer roles");
     require(a[0].n==g.ff&&a[1].n==g.ff&&a[0].k==g.dim&&a[1].k==g.dim&&a[2].n==g.dim&&a[2].k==g.ff,"grouped bank shape");
    }
-   if(soa)std::fprintf(stderr,"AIOPT_WARM_MMVQ layout=soa-v1 same_payload=1 reduction=paired-subblock-sg32 numerical_gate=proposal\n");
+   if(soa)std::fprintf(stderr,"AIOPT_WARM_MMVQ layout=soa-v1 same_payload=1 reduction=%s numerical_gate=unchanged\n",low_n?"exact-stride32-v3":exact_order?"exact-stride32-v2":"paired-subblock-sg32-v1");
    if(grouped)std::fprintf(stderr,"AIOPT_WARM_GROUPED capacity=%d workspace=%zu completion=one-per-layer-lane\n",grouped->capacity,grouped->bytes());
    warm_register(this);std::fprintf(stderr,"AIOPT_WARM_SYCL experts=%zu payload=%llu allocated=%llu workspace=%llu packed_gu=%d\n",plan.experts.size(),(unsigned long long)plan.payload,(unsigned long long)plan.allocated,(unsigned long long)workspace_bytes,int(packed_gu));
   }catch(...){clear();throw;}
@@ -85,6 +89,7 @@ public:
   if(soa){const int id=e;return warm_compute_many(l,std::span(&id,1),x).at(0);}
   const auto& g=ws.meta();require(x.size()==size_t(g.dim)&&warm_contains(l,e),"warm SYCL request extent/residency");
   require(std::all_of(x.begin(),x.end(),[](float z){return std::isfinite(z);}),"nonfinite warm input");
+  capture.record(l,x);
   const auto& a=matrices.at(l).at(size_t(plan.slot(l,e)));
   float* gate=work+g.dim;float* up=gate+g.ff;float* hidden=up+g.ff;float* y=hidden+g.ff;
   clock.begin(q);q.memcpy(work,x.data(),x.size_bytes());m::quantize(q,work,size_t(g.dim),g.dim,1,quant,scales);
@@ -97,6 +102,7 @@ public:
  std::vector<std::vector<float>> warm_compute_many(uint32_t l,std::span<const int> ids,std::span<const float> x)override{
   require(grouped&&x.size()==size_t(grouped->dim)&&!ids.empty()&&ids.size()<=size_t(grouped->capacity),"grouped bank request");
   require(std::all_of(x.begin(),x.end(),[](float v){return std::isfinite(v);}),"nonfinite grouped input");
+  capture.record(l,x);
   WarmPackedBatch a;std::string gu,dn;
   for(size_t i=0;i<ids.size();++i){require(warm_contains(l,ids[i]),"grouped selection not resident");
    for(size_t j=0;j<i;++j)require(ids[i]!=ids[j],"duplicate grouped selection");
@@ -108,7 +114,8 @@ public:
   std::vector<float> flat(ids.size()*size_t(grouped->dim));
   try{
    clock.begin(q);q.memcpy(grouped->x,x.data(),x.size_bytes());
-   if(soa)mmvq::enqueue(q,*grouped,a,int(ids.size()),gu,dn,ws.meta().lim,mmvq_table);
+   if(low_n)mmvq::v3::enqueue(q,*grouped,a,int(ids.size()),gu,dn,ws.meta().lim,mmvq_table);
+   else if(soa)mmvq::enqueue(q,*grouped,a,int(ids.size()),gu,dn,ws.meta().lim,mmvq_table,exact_order);
    else grouped->enqueue(a,int(ids.size()),gu,dn,ws.meta().lim,table2,tablexs,table1);
    q.memcpy(flat.data(),grouped->y,flat.size()*sizeof(float));clock.end(q);
    const auto elapsed=clock.elapsed_ns();

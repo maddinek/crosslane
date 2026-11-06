@@ -1,9 +1,11 @@
 // MIT. Native/CPU-shim execution of the actual SoA kernels and bank arithmetic.
 #pragma once
-#include "mmvq_project.hpp"
+#include "mmvq_v3.hpp"
 #include "mmvq_metrics.hpp"
+#include <cstdlib>
 #include <fstream>
 namespace mq=strata::wiring::mmvq;
+static bool mmvq_v2=false,mmvq_v3=false;
 static void metric_line(const char* stage,const mq::Metrics& v){
  std::printf("MMVQ_ACCURACY {\"stage\":\"%s\",\"count\":%llu,\"nrmse\":%.12g,\"max_abs\":%.12g,\"peak\":%.12g,\"max_relative_away_from_zero\":%.12g,\"max_ulp\":%llu}\n",stage,(unsigned long long)v.count,v.nrmse(),v.max_abs,v.peak,v.max_relative,(unsigned long long)v.max_ulp);
 }
@@ -29,12 +31,23 @@ struct MmvqFixture {
  WarmPackedBatch descriptor(int count,bool soa){WarmPackedBatch b;for(int i=0;i<count;++i){size_t slot=refs.size()-1-size_t(i);auto& c=*refs[slot];b.gate[i]=soa?reordered[slot][0]->p:c.gate.p;b.up[i]=soa?reordered[slot][1]->p:c.up.p;b.down[i]=soa?reordered[slot][2]->p:c.down.p;b.gate_ld[i]=c.a[0].ld;b.up_ld[i]=c.a[1].ld;b.down_ld[i]=c.a[2].ld;}return b;}
  template<class T>std::vector<T> read(const T* p,size_t n){std::vector<T> v(n);q.memcpy(v.data(),p,n*sizeof(T)).wait_and_throw();return v;}
  template<class T>static std::vector<T> slice(const std::vector<T>& v,size_t slot,size_t n){return {v.begin()+slot*n,v.begin()+(slot+1)*n};}
- WarmGroupedWorkspace::Events enqueue(int count,bool soa,float lim){auto a=descriptor(count,soa);return soa?mq::enqueue(q,*w,a,count,refs[0]->a[0].type,refs[0]->a[2].type,lim,table.p):w->enqueue(a,count,refs[0]->a[0].type,refs[0]->a[2].type,lim,exact_tables.xx.p,exact_tables.xs.p,exact_tables.im.p);}
+ WarmGroupedWorkspace::Events enqueue(int count,bool soa,float lim){auto a=descriptor(count,soa);w->fast=mmvq_v2&&!soa;if(soa&&mmvq_v3)return mq::v3::enqueue(q,*w,a,count,refs[0]->a[0].type,refs[0]->a[2].type,lim,table.p);return soa?mq::enqueue(q,*w,a,count,refs[0]->a[0].type,refs[0]->a[2].type,lim,table.p,mmvq_v2):w->enqueue(a,count,refs[0]->a[0].type,refs[0]->a[2].type,lim,exact_tables.xx.p,exact_tables.xs.p,exact_tables.im.p);}
  void check(int count,const std::vector<float>& x,float lim){
   need(count>0&&count<=w->capacity&&x.size()==size_t(w->dim),"MMVQ check input geometry");for(float v:x)need(std::isfinite(v),"MMVQ check nonfinite input");
   q.memcpy(w->x,x.data(),x.size()*4).wait_and_throw();enqueue(count,true,lim).down.wait_and_throw();
   auto gate=read(w->gate,size_t(count)*w->ff),up=read(w->up,size_t(count)*w->ff),hidden=read(w->hidden,size_t(count)*w->ff),out=read(w->y,size_t(count)*w->dim);
   auto hq=read(w->quant,size_t(count)*w->ff);auto hd=read(w->scale,size_t(count)*w->ff/32);
+  if(mmvq_v2){
+   // Same packed-strip production workspace and launch path; compare every
+   // intermediate before the separate scalar-device chain/interventions.
+   enqueue(count,false,lim).down.wait_and_throw();
+   exact(gate,read(w->gate,size_t(count)*w->ff),"v2 packed-strip gate");
+   exact(up,read(w->up,size_t(count)*w->ff),"v2 packed-strip up");
+   exact(hidden,read(w->hidden,size_t(count)*w->ff),"v2 packed-strip hidden");
+   exact(hq,read(w->quant,size_t(count)*w->ff),"v2 packed-strip Q8");
+   exact(hd,read(w->scale,size_t(count)*w->ff/32),"v2 packed-strip scales");
+   exact(out,read(w->y,size_t(count)*w->dim),"v2 packed-strip down");
+  }
   std::vector<int8_t> xq(x.size());std::vector<float> xd(x.size()/32);quant(x,xq,xd);
   for(int i=0;i<count;++i){auto& c=*refs[refs.size()-1-size_t(i)];auto g=slice(gate,i,w->ff),u=slice(up,i,w->ff),h=slice(hidden,i,w->ff),y=slice(out,i,w->dim);
    projection(c.a[0],g,xq,xd,"gate CPU");projection(c.a[1],u,xq,xd,"up CPU");
@@ -43,34 +56,66 @@ struct MmvqFixture {
    auto cg=reference(c.a[0],xq,xd),cu=reference(c.a[1],xq,xd);std::vector<float> ch(h.size());for(size_t j=0;j<ch.size();++j)ch[j]=m::swiglu<Math>(cg[j],cu[j],lim);
    quant(ch,cq,cd);auto cy=reference(c.a[2],cq,cd);auto cpu_metric=mq::metrics(y,cy);metric_line("whole expert CPU",cpu_metric);need(cpu_metric.expert_ok(),"MMVQ complete CPU expert gate");
    q.memcpy(c.x.p,x.data(),x.size()*4).wait_and_throw();c.run(true,lim);auto device_metric=mq::metrics(y,c.y.read());metric_line("whole expert exact device",device_metric);need(device_metric.expert_ok(),"MMVQ complete exact-device expert gate");
-   auto eq=c.codes.read();size_t flips=0;for(int j=0;j<w->ff;++j)flips+=eq[j]!=hq[size_t(i)*w->ff+j];std::printf("MMVQ_HIDDEN_Q8 selected=%d flips=%zu total=%d\n",i,flips,w->ff);
+   auto eq=c.codes.read();auto ed=c.d.read();auto eh=c.h.read();auto eg=c.g.read();auto eu=c.u.read();
+   eq.resize(size_t(w->ff));ed.resize(size_t(w->ff/32));
+   auto candidate_q=slice(hq,i,w->ff);auto candidate_d=slice(hd,i,w->ff/32);
+   size_t flips=0,scale_changes=0;int first_flip=-1;
+   for(int j=0;j<w->ff;++j)if(eq[j]!=candidate_q[j]){if(first_flip<0)first_flip=j;++flips;}
+   for(int j=0;j<w->ff/32;++j)scale_changes+=std::memcmp(&ed[j],&candidate_d[j],4)!=0;
+   metric_line("gate exact device",mq::metrics(g,eg));metric_line("up exact device",mq::metrics(u,eu));
+   metric_line("hidden exact device",mq::metrics(h,eh));
+   std::printf("MMVQ_HIDDEN_Q8 selected=%d flips=%zu total=%d scale_changes=%zu scale_total=%d\n",i,flips,w->ff,scale_changes,w->ff/32);
+   if(first_flip>=0){int j=first_flip;std::printf("MMVQ_BOUNDARY selected=%d index=%d exact_hidden=%a candidate_hidden=%a exact_scale=%a candidate_scale=%a exact_code=%d candidate_code=%d\n",i,j,eh[j],h[j],ed[j/32],candidate_d[j/32],int(eq[j]),int(candidate_q[j]));}
+   // Intervene only at the hidden-Q8 input to down: keep SoA/down arithmetic.
+   // If whole-expert drift disappears, hidden quantization is the amplifier.
+   WarmPackedBatch same;same.down[0]=reordered[refs.size()-1-size_t(i)][2]->p;
+   auto intervene=[&](const std::vector<int8_t>& codes,const std::vector<float>& scales,const char* stage){
+    q.memcpy(w->quant,codes.data(),codes.size()).wait_and_throw();q.memcpy(w->scale,scales.data(),scales.size()*4).wait_and_throw();
+    if(mmvq_v3)mq::v3::dispatch<false>(q,c.a[2].type,same,1,w->dim,w->ff,w->y,nullptr,w->quant,w->scale,table.p).wait_and_throw();
+    else mq::dispatch<false>(q,c.a[2].type,same,1,w->dim,w->ff,w->y,nullptr,w->quant,w->scale,table.p,mmvq_v2).wait_and_throw();
+    auto value=read(w->y,size_t(w->dim));metric_line(stage,mq::metrics(value,c.y.read()));return value;
+   };
+   if(flips||scale_changes){
+    intervene(eq,candidate_d,"down exact codes candidate scales");
+    intervene(candidate_q,ed,"down candidate codes exact scales");
+   }
+   auto reinjected=intervene(eq,ed,"down exact hidden device");
+   if(mmvq_v2){exact(g,eg,"v2 gate device");exact(u,eu,"v2 up device");exact(h,eh,"v2 hidden device");exact(candidate_q,eq,"v2 hidden Q8 device");exact(candidate_d,ed,"v2 hidden scales device");exact(y,c.y.read(),"v2 whole expert device");exact(reinjected,c.y.read(),"v2 down exact hidden device");}
   }
  }
- void prefixes(const std::vector<float>& x,float lim){
+ void prefixes(const std::vector<float>& x,float lim,bool extended=false){
   q.memcpy(w->x,x.data(),x.size()*4).wait_and_throw();enqueue(8,true,lim).down.wait_and_throw();auto all=read(w->y,size_t(8)*w->dim);
-  for(int count:{1,2,4,8,1}){enqueue(count,true,lim).down.wait_and_throw();auto got=read(w->y,size_t(count)*w->dim);exact(got,std::vector<float>(all.begin(),all.begin()+got.size()),"MMVQ native batch prefix");}
+  for(int count:(extended?std::vector<int>{1,2,3,4,5,6,8,1}:std::vector<int>{1,2,4,8,1})){enqueue(count,true,lim).down.wait_and_throw();auto got=read(w->y,size_t(count)*w->dim);exact(got,std::vector<float>(all.begin(),all.begin()+got.size()),"MMVQ native batch prefix");}
  }
- struct Timing {uint64_t host,span,gate_up,down;};
- Timing run(int count,bool soa,const std::vector<float>& x,float lim){std::vector<float> out(size_t(count)*w->dim);try{auto begin=now();auto start=q.single_task([]{});q.memcpy(w->x,x.data(),x.size()*4);auto events=enqueue(count,soa,lim);q.memcpy(out.data(),w->y,out.size()*4);auto end=q.single_task([]{});end.wait_and_throw();const auto host=now()-begin;
-  auto elapsed=[](const sycl::event& e){return e.get_profiling_info<sycl::info::event_profiling::command_end>()-e.get_profiling_info<sycl::info::event_profiling::command_start>();};for(float v:out)need(std::isfinite(v),"MMVQ timing nonfinite");return {host,end.get_profiling_info<sycl::info::event_profiling::command_start>()-start.get_profiling_info<sycl::info::event_profiling::command_end>(),elapsed(events.gate_up),elapsed(events.down)};
+ struct Timing {uint64_t host,span,gate_up,down,service;};
+ Timing run(int count,bool soa,const std::vector<float>& x,float lim,bool service_timing=false){const auto service_begin=service_timing?now():0;std::vector<float> out(size_t(count)*w->dim);try{auto begin=now();auto start=q.single_task([]{});q.memcpy(w->x,x.data(),x.size()*4);auto events=enqueue(count,soa,lim);q.memcpy(out.data(),w->y,out.size()*4);auto end=q.single_task([]{});end.wait_and_throw();const auto host=now()-begin;
+  auto elapsed=[](const sycl::event& e){return e.get_profiling_info<sycl::info::event_profiling::command_end>()-e.get_profiling_info<sycl::info::event_profiling::command_start>();};for(float v:out)need(std::isfinite(v),"MMVQ timing nonfinite");return {host,end.get_profiling_info<sycl::info::event_profiling::command_start>()-start.get_profiling_info<sycl::info::event_profiling::command_end>(),elapsed(events.gate_up),elapsed(events.down),service_timing?now()-service_begin:0};
   }catch(...){try{q.wait_and_throw();}catch(...){}throw;}
  }
 };
+#include "mmvq_v3_check.hpp"
 static void mmvq_actual_k(sycl::queue& q,Tables& t,std::mt19937& rng){
  auto host=mq::codebooks();Device<uint32_t> table(q,mq::table_words);q.memcpy(table.p,host.data(),sizeof(host)).wait_and_throw();size_t cases=0;
  for(const std::string type:{"IQ2_XXS","IQ2_XS","IQ1_M"})for(int k:{256,2304,5120})for(int n:{1,5}){
   auto a=synthetic({type,type,type},rng,k,256)[0];a.n=n;a.bytes.resize(size_t(n)*a.ld);auto soa=mq::reorder(mq::kind(type),n,k,a.bytes);need(mq::restore(mq::kind(type),n,k,soa)==a.bytes,"actual-K SoA roundtrip");Device<uint8_t> w(q,soa);WarmPackedBatch b;b.down[0]=w.p;
   std::vector<int8_t>x(size_t(k),0);std::vector<float>d(size_t(k/32));for(auto& v:x)v=int8_t(int(rng()%255)-127);for(size_t i=0;i<d.size();++i)d[i]=float(i%17+1)/128;
-  Device<int8_t> dx(q,x);Device<float> dd(q,d),y(q,size_t(n));mq::dispatch<false>(q,type,b,1,n,k,y.p,nullptr,dx.p,dd.p,table.p).wait_and_throw();projection(a,y.read(),x,d,"actual K/tail CPU");++cases;
+  Device<int8_t> dx(q,x);Device<float> dd(q,d),y(q,size_t(n));if(mmvq_v3)mq::v3::dispatch<false>(q,type,b,1,n,k,y.p,nullptr,dx.p,dd.p,table.p).wait_and_throw();else mq::dispatch<false>(q,type,b,1,n,k,y.p,nullptr,dx.p,dd.p,table.p,mmvq_v2).wait_and_throw();projection(a,y.read(),x,d,"actual K/tail CPU");if(mmvq_v2)exact(y.read(),reference(a,x,d),"v2 actual K/tail");++cases;
  }
  std::printf("MMVQ_ACTUAL_K %zu\n",cases);
 }
 static int mmvq_main(int argc,char** argv){
- std::string pack,activation_path;for(int i=1;i<argc;i+=2){need(i+1<argc,"missing MMVQ argument");std::string flag=argv[i];if(flag=="--pack"&&pack.empty())pack=argv[i+1];else if(flag=="--activations"&&activation_path.empty())activation_path=argv[i+1];else throw std::invalid_argument("unknown/duplicate MMVQ argument");}
+ std::string grid;std::string pack,activation_path,mode;for(int i=1;i<argc;i+=2){need(i+1<argc,"missing MMVQ argument");std::string flag=argv[i];if(flag=="--pack"&&pack.empty())pack=argv[i+1];else if(flag=="--activations"&&activation_path.empty())activation_path=argv[i+1];else if(flag=="--mode"&&mode.empty())mode=argv[i+1];else if(flag=="--grid"&&grid.empty())grid=argv[i+1];else throw std::invalid_argument("unknown/duplicate MMVQ argument");}
+ need(grid.empty()||grid=="path-a15","invalid MMVQ grid");need(grid.empty()||mode=="mmvq-soa-v2","path-a15 grid requires v2");
+ const std::vector<int> sizes=grid.empty()?std::vector<int>{1,2,4,8}:std::vector<int>{1,2,3,4,5,6,8};
+ if(!grid.empty())std::puts("MMVQ_GRID path-a15");
+ need(mode.empty()||mode=="mmvq-soa-v1"||mode=="mmvq-soa-v2"||mode=="mmvq-soa-v3","invalid MMVQ mode");mmvq_v3=mode=="mmvq-soa-v3";mmvq_v2=mmvq_v3||mode=="mmvq-soa-v2";
+ std::printf("MMVQ_MODE %s\n",mmvq_v3?"mmvq-soa-v3":mmvq_v2?"mmvq-soa-v2":"mmvq-soa-v1");
 #ifdef STRATA_MMVQ_TIMING
  need(!pack.empty(),"native MMVQ timing requires real pack");
 #endif
- sycl::queue q(sycl::gpu_selector_v,sycl::property_list{sycl::property::queue::in_order{},sycl::property::queue::enable_profiling{}});
+ if(const char* profile=std::getenv("AIOPT_MMVQ_V3_PROFILE")){need(mmvq_v3&&(std::string_view(profile)=="0"||std::string_view(profile)=="1"),"invalid v3 profiling switch");mmvq_v3_profile=std::string_view(profile)=="1";}
+ sycl::queue q(sycl::gpu_selector_v,mmvq_v3_profile?sycl::property_list{sycl::property::queue::in_order{},sycl::property::queue::enable_profiling{}}:sycl::property_list{sycl::property::queue::in_order{}});
+ if(mmvq_v3){const char* immediate=std::getenv("UR_L0_USE_IMMEDIATE_COMMANDLISTS");std::printf("MMVQ_V3_ENV profile=%d immediate=%s\n",int(mmvq_v3_profile),immediate?immediate:"inherited");}
 #ifndef STRATA_IQ2_HOST_TEST
  auto dev=q.get_device();need(dev.is_gpu()&&dev.get_info<sycl::info::device::vendor_id>()==0x8086,"MMVQ requires Intel GPU");std::printf("NATIVE device=%s driver=%s\n",dev.get_info<sycl::info::device::name>().c_str(),dev.get_info<sycl::info::device::driver_version>().c_str());
 #else
@@ -94,10 +139,13 @@ static int mmvq_main(int argc,char** argv){
    if(!warm_packed_type(ty[0])||!warm_packed_type(ty[2])||ty[0]!=ty[1])continue;
    bool first=found.insert(sig).second;if(first)std::printf("REAL_SIGNATURE layer=%d signature=%s\n",l,sig.c_str());if(!first&&!captures.contains(l))continue;
    MmvqFixture f(q,tables);for(int e=0;e<8;++e){std::array<Matrix,3>a;for(int r=0;r<3;++r){auto name=layer_prefix(l)+"ffn.experts."+std::to_string(e)+"."+roles[r]+".weight";auto z=ws->require_tensor(name);need(z.shape.size()==2&&z.shape[0]>0&&z.shape[1]>0&&z.shape[0]<=INT32_MAX&&z.shape[1]<=INT32_MAX,"MMVQ pack shape");auto& mtx=a[r];mtx.type=z.dtype;mtx.n=int(z.shape[0]);mtx.k=int(z.shape[1]);mtx.ld=m::row_bytes(m::type(z.dtype),mtx.k);auto raw=ws->read_all(name);need(raw.size()==size_t(mtx.n)*mtx.ld,"MMVQ pack extent");mtx.bytes.resize(raw.size());std::memcpy(mtx.bytes.data(),raw.data(),raw.size());std::printf("TENSOR %s bytes=%zu\n",name.c_str(),raw.size());}f.add(std::move(a));}f.ready();
-   std::vector<float>x(size_t(f.w->dim));for(auto& v:x)v=float(int(rng()%255)-127)/32;std::printf("MMVQ_CASE layer=%d signature=%s input=synthetic\n",l,sig.c_str());f.check(8,x,ws->meta().lim);f.prefixes(x,ws->meta().lim);++checks;
-   if(captures.contains(l)){for(const auto& input:captures.at(l)){std::printf("MMVQ_CASE layer=%d signature=%s input=captured\n",l,sig.c_str());f.check(8,input,ws->meta().lim);++checks;}captures.erase(l);}
+   std::vector<float>x(size_t(f.w->dim));for(auto& v:x)v=float(int(rng()%255)-127)/32;std::printf("MMVQ_CASE layer=%d signature=%s input=synthetic\n",l,sig.c_str());f.check(8,x,ws->meta().lim);f.prefixes(x,ws->meta().lim,!grid.empty());++checks;
+   if(mmvq_v3)for(int n=1;n<=6;++n)f.check(n,x,ws->meta().lim);
+   if(captures.contains(l)){for(const auto& input:captures.at(l)){std::printf("MMVQ_CASE layer=%d signature=%s input=captured\n",l,sig.c_str());f.check(8,input,ws->meta().lim);if(mmvq_v3)for(int n:{1,2})f.check(n,input,ws->meta().lim);++checks;}captures.erase(l);}
 #ifdef STRATA_MMVQ_TIMING
-   if(first){Device<uint32_t> scrub(q,64*1024*1024);auto ptr=scrub.p;for(int n:{1,2,4,8})for(int cache=0;cache<2;++cache){for(int warm=0;warm<3;++warm){f.run(n,false,x,ws->meta().lim);f.run(n,true,x,ws->meta().lim);}for(int rep=0;rep<5;++rep)for(int arm=0;arm<2;++arm){bool soa=(arm+rep)%2;if(cache)q.parallel_for(sycl::range<1>(scrub.n),[=](sycl::id<1> i){ptr[i[0]]=uint32_t(i[0])*1664525u+1013904223u;}).wait_and_throw();auto tm=f.run(n,soa,x,ws->meta().lim);std::printf("MMVQ_TIMING {\"signature\":\"%s\",\"layer\":%d,\"n\":%d,\"cache\":\"%s\",\"mode\":\"%s\",\"rep\":%d,\"host_ns\":%llu,\"span_ns\":%llu,\"gate_up_ns\":%llu,\"down_ns\":%llu}\n",sig.c_str(),l,n,cache?"scrubbed":"warm",soa?"mmvq-soa":"exact-grouped",rep,(unsigned long long)tm.host,(unsigned long long)tm.span,(unsigned long long)tm.gate_up,(unsigned long long)tm.down);}}}
+   if(mmvq_v3){if(first)mmvq_v3_timing(f,x,ws->meta().lim,l,sig);}
+   else
+   if(first){Device<uint32_t> scrub(q,64*1024*1024);auto ptr=scrub.p;for(int n:sizes)for(int cache=0;cache<2;++cache){for(int warm=0;warm<3;++warm){f.run(n,false,x,ws->meta().lim,!grid.empty());f.run(n,true,x,ws->meta().lim,!grid.empty());}for(int rep=0;rep<5;++rep)for(int arm=0;arm<2;++arm){bool soa=(arm+rep)%2;if(cache)q.parallel_for(sycl::range<1>(scrub.n),[=](sycl::id<1> i){ptr[i[0]]=uint32_t(i[0])*1664525u+1013904223u;}).wait_and_throw();auto tm=f.run(n,soa,x,ws->meta().lim,!grid.empty());std::printf("MMVQ_TIMING {\"signature\":\"%s\",\"layer\":%d,\"n\":%d,\"cache\":\"%s\",\"mode\":\"%s\",\"rep\":%d,\"host_ns\":%llu,\"span_ns\":%llu,\"gate_up_ns\":%llu,\"down_ns\":%llu}\n",sig.c_str(),l,n,cache?"scrubbed":"warm",soa?(mmvq_v2?"mmvq-soa-v2":"mmvq-soa"):(mmvq_v2?"packed-strip-v1":"exact-grouped"),rep,(unsigned long long)tm.host,(unsigned long long)tm.span,(unsigned long long)tm.gate_up,(unsigned long long)tm.down);if(!grid.empty())std::printf("MMVQ_SERVICE {\"layer\":%d,\"n\":%d,\"cache\":\"%s\",\"mode\":\"%s\",\"rep\":%d,\"service_ns\":%llu}\n",l,n,cache?"scrubbed":"warm",soa?"mmvq-soa-v2":"packed-strip-v1",rep,(unsigned long long)tm.service);}}}
 #endif
   }
   need(!found.empty(),"MMVQ pack has no packed-supported signatures");need(captures.empty(),"unconsumed MMVQ captured layers");

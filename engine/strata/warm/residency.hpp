@@ -43,6 +43,7 @@ inline void apply_warm_sycl(stage::Plan& p,const Config& cfg,const WarmResidency
  if(cfg.warm_sycl_attention!="scalar-v1")p.schema_sha+=";warm-attn="+cfg.warm_sycl_attention;
  if(cfg.warm_hip_schedule!="baseline-v1")p.schema_sha+=";warm-hip-schedule="+cfg.warm_hip_schedule;
  if(cfg.warm_kernel_timing)p.schema_sha+=";warm-kernel-timing=1";
+ if(cfg.warm_hip_fuse!="off")p.schema_sha+=";warm-hip-fuse="+cfg.warm_hip_fuse;
  if(cfg.warm_hip_dense!="off")p.schema_sha+=";warm-hip-dense="+cfg.warm_hip_dense;
  p.validate();
 }

@@ -28,12 +28,22 @@ tables (103 GB) are still read from disk, 48 rows per token.
 | a13 | exact-order B65 SoA kernel, CPU layer batching, default placement | 16.44 | 16.73 | 15.63 | 16.44 | 1/3 |
 | a13r | + rebalance | 18.04 | 18.48 | 17.80 | 18.04 | 0/3 |
 | a14 | + R9700 per-layer expert batching, default placement | 17.25 | 14.60 | 17.58 | 17.25 | 1/3 |
-| a14r | + rebalance | 21.29 | 21.27 | 19.62 | **21.27** | 2/3 |
+| a14r | + rebalance | 21.29 | 21.27 | 19.62 | 21.27 | 2/3 |
+| a15 | + parallel Engram reads (QD8, read-ahead), default placement | 18.22 | 18.84 | 18.31 | 18.31 | 1/3 |
+| a15r | + rebalance | 22.40 | 22.57 | 22.61 | 22.57 | 0/3 |
+| a16 | + AVX2 combine, early expert start, default placement (answers token-identical to a15) | 20.63 | 20.69 | 20.73 | 20.69 | 1/3 |
+| a16r | + rebalance | 25.47 | 25.57 | 25.65 | **25.57** | 0/3 |
 | a9r | MMVQ-style B65 kernel + rebalance: **failed the quality gate below, not adopted** | 18.19 | 17.05 | 18.53 | 18.19 | 0/3 |
 
 Strict = the generated module's own tests plus independent functional checks pass. With 3 sampled
 answers per run this is noisy, and many of the faster runs hit the 8,192 cap while still reasoning;
-the best time to passing code so far is 345 s (a14r r0).
+the fastest measured passing code at this cap is 333 s (a16 r2). All three a16r answers were cut off at
+the cap (text normal, not looping); across our history 43 of 72 comparable answers hit it, so that's plausible
+by chance and neither shows nor rules out a regression.
+
+With a cap of 11,900 at the a16r setup (one warm-up, one measured answer): 6,288 tokens at 25.64 tok/s, then
+7,179 tokens at 25.59 tok/s, finished by itself, strict pass, 13 own tests, working code in **295 s**. That's one
+answer. A 10-answer test at this cap is the real check and hasn't run yet.
 
 ## Where a token goes (a8c, per-kernel timers)
 
@@ -44,6 +54,32 @@ disk reads (layers 1 and 14, 48 serial reads per token).
 
 Per expert selection in a real run (from per-layer lane service deltas): CPU ~0.29 ms, R9700
 ~0.12–0.13 ms, B65 ~0.32 ms. Joined expert time per token (a8r2): ~25 ms.
+
+## Where a token goes (a16r)
+
+Decode-only per fed token, pooled over three answers: wall 39.124 ms; dense excluding Engram-containing regions
+22.149 ms; those regions 1.741 ms; expert join 11.914 ms; wall minus dense minus join 3.321 ms. Overlapping service: CPU 8.692,
+B65 9.583, R9700 8.153 ms. Selected experts per token: R9700 154.7, B65 55.6, CPU 29.7 (default placement 113.3 / 52.0 / 74.6).
+One measured diagnostic answer with kernel timers and an exclusive host partition (25.57 tok/s, no timer-off pair, not a
+speed claim): dense 19.752, join 11.823, shared-FFN wait 5.603, head 0.995, everything else 0.946 ms.
+
+Kernels over seven decode samples, launch spans including queue gaps: matrix-vector 8.020 + 3.638, attention 2.627, finish 1.641,
+HC mix 1.337, HC pre-norm 1.007, router 0.842, head 0.736, route 0.629, ring copies 0.681, hc_post 0.334, SwiGLU 0.296, top-k 0.270 ms.
+Traced time grows only 0.18 ms from position 1,024 to 7,168. Large Q5_K projections move 380–618 GB/s of weight
+payload against a measured 612 GB/s stream, so dense is near the memory limit, though the timers can't separate
+arithmetic from queue gaps.
+
+Estimates for what's left on exact kernels: 26–28 tok/s, no credible exact route to 30 yet.
+
+## Long prompts and long context
+
+- Prefill, one teacher-forced 8,192-token stream on a15r, a slope diagnostic: 1,024 tokens 48.7 s, 4,096 182.4 s, 8,192 369.4 s (22.2 tok/s), with no slowdown by position.
+- 12,001 positions on a16r, unchanged reserves: R9700 28.47 GB whole device (minimum free 5.73 GB), B65 25.31 GB resident (28.5 GB ceiling), no growth with position; forced tokens ran at 23.5–25.3 tok/s. Sampling can miss spikes.
+
+## DSpark and Q2_K
+
+- DSpark projection micro on real weights, R9700: batched rows byte-identical to serial on all 15 tensor signatures, T=1..6. Three rows cost 0.34–0.52 of three serial calls on Q5_K and Q8_0 tensors (head 1.02× one row, attention output 1.52×). Synthetic inputs, projections only. Acceptance on this edited model and the whole cycle are unmeasured.
+- Q2_K re-encoding of experts: stopped by a rule set before the run. Warm µs per selection at N=1/2/3/6: R9700 IQ 80.6/62.7/50.8/40.6, Q2_K 80.1/52.0/43.6/33.9; B65 IQ 187.7/152.3/139.4/124.8, Q2_K 212.6/173.1/157.1/142.2. Projected net −3.18 ms per token, because bigger experts push 1,434 back to the CPU.
 
 ## Where a token goes (a14r)
 

@@ -59,6 +59,10 @@ public:
     }
     const char* name() const override { return name_.c_str(); }
 #ifdef STRATA_FORK_WARM
+    template<class T> T* warm_host_partition()const {
+        dlerror();auto fn=reinterpret_cast<T*(*)()>(dlsym(h_->library,"strata_warm_host_partition_v1"));
+        if(const char* why=dlerror())throw std::runtime_error(why);return fn();
+    }
     auto warm_stop_function()const -> void(*)(){
         dlerror();auto fn=reinterpret_cast<void(*)()>(dlsym(h_->library,"strata_warm_stop_workers_v1"));
         if(const char* why=dlerror())throw std::runtime_error(why);return fn;

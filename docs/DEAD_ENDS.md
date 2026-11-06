@@ -16,4 +16,9 @@ Things that looked promising and were measured not to help, or broke, on the ref
 | Python 3.11 vs 3.12+ `sum()` of floats | Timing replays differed in the last bit across machines. | Use `math.fsum` for anything that must reproduce. |
 | CPU layer batching as a big lever | Bit-exact, but at most 1.12× at 6 selections and about 1.0× at the usual 1–2. 8 workers are about as fast as 16. | Kept on as a safe option; the CPU lane looks memory-limited. |
 | Reading Engram cost as a fixed gap | Identical tokens showed Engram layers anywhere from about 5 to 17 ms/token, swinging run medians by about 15%. | Report dense-minus-Engram; compare runs only with that in view. |
-
+| Q2_K or Q4_K re-encoding of experts | Stop rule set first: at least 3 ms saved, at most 100 µs per selection. Result: projected −3.18 ms, worst 259 µs. Q2_K experts are 50% bigger, so 1,434 fall back to the CPU; slower than IQ on the B65, 14–17% faster on the R9700 only when batched. Q4_K −14.13 ms and doesn't fit the store. | The heavy IQ formats already suit this hardware. A faster codec has to stay no bigger than IQ. |
+| R9700 SoA expert kernel and dense Q5 sum reordering | 0.94–1.08× and about 1.00×. | The expert and matrix-vector kernels are close to what the memory allows. |
+| B65 v3 kernel, CPU huge pages, prefetch and spin | At most 1.03×, and 0.95–1.00×. | Repeated experts run 1.41× faster on the CPU, but those knobs didn't reach it. |
+| Reading a row cache as the Engram fix | A 128 MiB cache alone gave no gain in good state. Parallel reads at QD8 with read-ahead did. | Queue depth, not caching, was the lever. |
+| Reading high margin as a safe prediction | The worst error between two placements had margin 2.56: confident and wrong. Margin checks at .45 or .9 miss it. | A correction step can't rely on confidence alone. |
+| Expecting pruning to speed up an expert model | Six picks per layer still run after pruning; ISTA's 192-expert Coder mask drops 22% of our picks, and its publisher reports SWE-bench 77.0 vs 81.2. | Pruning buys memory, not fewer computations, and not better coding. |

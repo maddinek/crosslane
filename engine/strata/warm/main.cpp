@@ -2,6 +2,8 @@
 #include "../sycl/stage/wiring/host_plan.hpp"
 #include "balance.hpp"
 #include "calibration.hpp"
+#include "sample_protocol.hpp"
+#include "host_partition.hpp"
 #include "../sycl/stage/wiring/loader_v2.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +34,14 @@ int main(int argc,char** argv)try{
  auto need=[&](const char* k){auto p=args.find(k);require(p!=args.end(),std::string("missing ")+k);return p->second;};
  auto number=[&](const char* k){return std::stoull(need(k));};
  const auto ctx=number("--ctx");std::ifstream conf(need("--stage-config"));std::stringstream text;text<<conf.rdbuf();require(bool(conf),"warm config open/read");
+ strata::forkwarm::SampleProtocol protocol;
+ if(args.count("--quality-samples"))protocol=strata::forkwarm::SampleProtocol::quality(number("--quality-samples"),number("--quality-max-tokens"));
+ else require(!args.count("--quality-max-tokens"),"quality cap requires explicit quality samples");
+ require(ctx==protocol.context,"noncanonical warm context");
+ std::ifstream schedule(need("--requests"));require(bool(schedule),"warm schedule open");
+ const auto scheduled=protocol.read(schedule);
+ if(protocol.sampled)setenv("DS4_WARM_REQUESTS",std::to_string(protocol.request_count()).c_str(),1);
+ else unsetenv("DS4_WARM_REQUESTS");
  std::string cfg="pack="+need("--pack")+"\nmax_context="+std::to_string(ctx)+"\n"+text.str();
  // The frozen file is immutable across fresh checkouts; the explicit CLI binds
  // its byte-identical profile copy in the mounted execution checkout.
@@ -58,9 +68,8 @@ int main(int argc,char** argv)try{
  dlerror();auto boundary=reinterpret_cast<Boundary>(dlsym(cpu,"strata_warm_boundary_v1"));if(const char* why=dlerror())throw std::runtime_error(why);
  // Both ranges use equal-length passes of the same canonical IDs and native clocks.
  // No expert banks or preload in calibration; the final owned store/banks are fresh.
- std::ifstream schedule(need("--requests"));uint64_t calibration_seed=0,calibration_max=0,n_ids=0;
- require(bool(schedule>>calibration_seed>>calibration_max>>n_ids)&&n_ids==325,"calibration canonical schedule");
- std::vector<int32_t> calibration_ids(n_ids);for(auto& id:calibration_ids)require(bool(schedule>>id),"calibration IDs short");
+ const auto& calibration_ids=scheduled.front().ids;
+ for(auto id:calibration_ids)require(id<ws->meta().vocab,"calibration ID out of vocabulary");
  WarmCalibration sycl_calibration,hip_calibration;
  std::map<uint32_t,std::vector<double>> handoff_passes;
  setenv("DS4_STORE_PRELOAD","0",1);
@@ -105,34 +114,39 @@ int main(int argc,char** argv)try{
  // Construct after both libraries and before Runtime: on every unwind, join
  // the persistent service threads while their vendor libraries are still loaded.
  struct StopServices {Reset fn;~StopServices(){fn();}} stop_services{stop};
+ dlerror();auto host_api=reinterpret_cast<HostPartition*(*)()>(dlsym(cpu,"strata_warm_host_partition_v1"));if(const char* why=dlerror())throw std::runtime_error(why);
+ auto* host=host_api();host->configure(size_t(ws->meta().nl));
  stage::Runtime runtime(plan,sycl,hip,*ngram);runtime.begin(1);
  std::fprintf(stderr,"AIOPT_WARM_DEVICES %s | %s\n",sycl.describe().c_str(),hip.describe().c_str());
  memory_snapshot((std::filesystem::path(need("--chosen-plan")).parent_path()/"memory-after-load.json").string());
  std::cout<<"READY\n"<<std::flush;
- std::ifstream requests(need("--requests"));require(bool(requests),"warm request schedule open");
- uint64_t counter=0,fed=0,index=0,seed=0,maxnew=0,count=0;
- while(requests>>seed>>maxnew>>count){
-  require(index<4&&seed==1000+index&&count==325&&maxnew==8192&&ctx==12288,"noncanonical a6 warm request schedule");
-  std::vector<int32_t> ids(count);for(auto& id:ids){require(bool(requests>>id),"short warm IDs");require(id>=0&&id<ws->meta().vocab,"warm ID out of vocabulary");}
-  require(count+maxnew-1<=ctx,"warm generation exceeds context");
+ uint64_t counter=0,fed=0,index=0;
+ for(const auto& request:scheduled){
+  const auto seed=request.seed,maxnew=request.max_tokens,count=uint64_t(request.ids.size());
+  const auto& ids=request.ids;for(auto id:ids)require(id<ws->meta().vocab,"warm ID out of vocabulary");
+  if(protocol.sampled)counter=request.counter_start;
   const auto counter_start=counter,begin=now();std::cout<<"BEGIN "<<index<<' '<<seed<<' '<<counter<<'\n'<<std::flush;
   runtime.begin(index+2);boundary("begin",fed,count,0);
   for(auto id:ids){require(now()-begin<1800000000000ull,"warm request 1800s deadline");(void)runtime.token(id);++fed;}
   boundary("prefill",fed,count,0);
   auto dense_report=[&](const char* phase){for(auto pair:{std::pair<const char*,LoadedBackend*>("sycl",&sycl),{"hip",&hip}}){auto values=pair.second->warm_dense_costs();if(hip_only&&std::string_view(pair.first)=="sycl"){require(values.empty(),"expert-only B65 produced dense costs");values.assign(size_t(ws->meta().nl)+1,0);}for(size_t l=0;l<values.size();++l)std::fprintf(stderr,"AIOPT_WARM_DENSE request=%llu phase=%s backend=%s layer=%zu mean_event_ns=%.9f calls=%llu\n",(unsigned long long)index+1,phase,pair.first,l,values[l],(unsigned long long)(values[l]>0?fed:0));}};
   dense_report("prefill");const auto decode_start=now();
+  host->begin(index+1,seed,count,decode_start);
   uint64_t produced=0;bool eos=false;
   while(produced<maxnew){
    require(now()-begin<1800000000000ull,"warm request 1800s deadline");
-   auto token=hip.sample(1.0f,1.0f,64,0.0f,seed,counter++);++produced;
-   std::cout<<"TOKEN "<<token<<'\n'<<std::flush;
+   host->position(produced);
+   int32_t token;{HostScope scope(host,HostPart::sample);token=hip.sample(1.0f,1.0f,64,0.0f,seed,counter++);}++produced;
+   {HostScope scope(host,HostPart::output);std::cout<<"TOKEN "<<token<<'\n'<<std::flush;}
+   if(protocol.sampled&&produced==protocol.checkpoint){const auto checkpoint=now();
+    std::cout<<"CHECKPOINT "<<produced<<' '<<decode_start-begin<<' '<<checkpoint-decode_start<<' '<<counter_start<<' '<<counter<<'\n'<<std::flush;}
    if(token==ws->meta().eos){eos=true;break;}
-   if(produced<maxnew){(void)runtime.token(token);++fed;}
+   if(produced<maxnew){HostScope scope(host,HostPart::runtime);(void)runtime.token(token);++fed;}
   }
-  const auto finish=now();boundary("end",fed,count,produced);dense_report("end");
+  const auto finish=now();host->end(finish,produced,produced-1);boundary("end",fed,count,produced);dense_report("end");
   std::cout<<"END "<<produced<<' '<<decode_start-begin<<' '<<finish-decode_start<<' '<<(eos?"eos":"length")<<' '<<counter_start<<' '<<counter<<'\n'<<std::flush;++index;
  }
- require(requests.eof()&&index==4,"warm schedule requires exactly four complete requests");
+ require(index==protocol.request_count(),"warm schedule requires its exact frozen request count");
  if(args.count("--reader-pid")){int status=0;pid_t p=pid_t(number("--reader-pid"));require(p>0,"invalid warm reader PID");
   std::cout<<"COMPLETE\n"<<std::flush;std::cout.flush();
   // Reader sees COMPLETE before the pipe closes; preserve the audited native PID until archive writes finish.

@@ -6,6 +6,9 @@
 //     --tokens ids.txt [--generate N] --out <dir> [--sycl-index 0 --hip-index 0] [--stage-config file]
 #include "host_plan.hpp"
 #include "loader_v2.hpp"
+#ifdef STRATA_FORK_WARM
+#include "../../../warm/host_partition.hpp"
+#endif
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -118,6 +121,20 @@ int main(int argc, char** argv) {
         require(lf && tf, "cannot open outputs");
         std::ofstream timing_file;
         if(a.count("--timing")){timing_file.open(a["--timing"]);require(bool(timing_file),"timing output open failed");}
+#ifdef STRATA_FORK_WARM
+        HostPartition* host=nullptr;
+        if(a.count("--host-partition")){
+            require(a.at("--host-partition")=="1"&&config.warm_experts&&plan.hip_dense_only(),"host teacher requires HIP cut0 warm mode");
+            setenv("DS4_WARM_HOST_PARTITION","1",1);
+            if(a.count("--host-ordered-limit")){
+                require(u64("--host-ordered-limit",0)==toks.size()+gen,"host teacher trace must cover exact stream");
+                setenv("DS4_WARM_ORDERED_PREFIX",(out+"/ordered").c_str(),1);
+                setenv("DS4_WARM_ORDERED_LIMIT",a.at("--host-ordered-limit").c_str(),1);
+            }
+            host=hip.warm_host_partition<HostPartition>();host->configure(size_t(ws->meta().nl));
+            host->begin(1,0,0,HostPartition::now());
+        }
+#endif
         int32_t next = -1;
         for (size_t i = 0; i < toks.size() + gen; ++i) {
             int32_t id;
@@ -131,7 +148,12 @@ int main(int argc, char** argv) {
             stage::TokenTiming timing;
             const bool timed=a.count("--timing");
             const auto step_start=timed?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+#ifdef STRATA_FORK_WARM
+            if(host)host->position(i);
+            auto logits=[&]{HostScope scope(host,HostPart::runtime);return rt.token(id,timed?&timing:nullptr);}();
+#else
             auto logits = rt.token(id,timed?&timing:nullptr);
+#endif
             require(logits.size()==size_t(ws->meta().vocab) &&
                     std::all_of(logits.begin(),logits.end(),[](float x){return std::isfinite(x);}),
                     "empty, wrong-size or nonfinite logits");
@@ -147,6 +169,9 @@ int main(int argc, char** argv) {
             require(std::fwrite(logits.data(), 4, logits.size(), lf) == logits.size(), "logit write");
             require(std::fprintf(tf, "%zu %d %d\n", i, id, next) > 0, "greedy write");
         }
+#ifdef STRATA_FORK_WARM
+        if(host)host->end(HostPartition::now(),rt.committed_steps(),rt.committed_steps());
+#endif
         require(std::fclose(lf) == 0 && std::fclose(tf) == 0, "output close failed");
         if(a.count("--timing")){timing_file.close();require(bool(timing_file),"timing close failed");}
         std::fprintf(stderr, "PASS steps=%llu\n", (unsigned long long) rt.committed_steps());

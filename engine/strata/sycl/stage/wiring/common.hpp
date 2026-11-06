@@ -27,8 +27,14 @@ struct Config {
     bool warm_experts = false;
     bool warm_measure = false;
     std::string warm_dense_owner = "split-v1"; // hip-v1: explicit empty SYCL dense range
+    std::string warm_hip_experts = "serial-v1"; // layer-batch-v1: exact kernels, one layer transfer
     std::string warm_hip_schedule = "baseline-v1"; // queued-v1: same kernels/order, fewer host waits
+    std::string warm_expert_issue = "off"; // early-v1: CPU/B65 overlap same-stream shared FFN
+    uint32_t warm_expert_timeline_limit = 0; // first N absolute positions/request, diagnostic only
+    std::string warm_engram = "off"; // read-ahead-v1: same-token host rows, HIP cut0 only
     bool warm_kernel_timing = false; // bounded launch spans; read only after dense-end wait
+    std::string warm_hip_fuse = "off"; // small-v1, attention-v1, all-v1; native qualification required
+    std::string warm_hip_gemv = "off"; // exact Q5 activation sums, 8/4 warps, native gate required
     std::string warm_hip_dense = "off"; // graphs-v1: four static device sequences per layer
 
     std::string warm_sycl_experts = "serial-v1"; // explicit grouped packed candidate
@@ -78,7 +84,13 @@ struct Config {
             else if (k == "warm_experts") { require(v=="0"||v=="1","warm_experts must be 0 or 1"); c.warm_experts=v=="1"; }
             else if (k == "warm_packed_gu") { require(v=="0"||v=="1","warm_packed_gu must be 0 or 1"); c.warm_packed_gu=v=="1"; }
             else if (k == "warm_dense_owner") c.warm_dense_owner=v;
+            else if (k == "warm_engram") c.warm_engram=v;
+            else if (k == "warm_hip_experts") c.warm_hip_experts=v;
+            else if (k == "warm_expert_issue") c.warm_expert_issue=v;
+            else if (k == "warm_expert_timeline_limit") { auto n=std::stoull(v);require(std::to_string(n)==v&&n<=2000,"expert timeline bound");c.warm_expert_timeline_limit=uint32_t(n); }
             else if (k == "warm_hip_schedule") c.warm_hip_schedule=v;
+            else if (k == "warm_hip_fuse") c.warm_hip_fuse=v;
+            else if (k == "warm_hip_gemv") c.warm_hip_gemv=v;
             else if (k == "warm_hip_dense") c.warm_hip_dense=v;
             else if (k == "warm_kernel_timing") { require(v=="0"||v=="1","warm_kernel_timing must be 0 or 1"); c.warm_kernel_timing=v=="1"; }
 
@@ -111,17 +123,32 @@ struct Config {
         require(!c.warm_experts || (c.hip_experts=="pooled-layer-v1" && c.warm_hip_fixed>0 && c.warm_sycl_fixed>0),"warm experts require pooled HIP and explicit SYCL cap");
         require(c.warm_experts || (c.warm_sycl_bytes==0 && c.warm_hip_bytes==0),"bank cap without warm mode");
         require(!c.warm_experts || c.warm_measure,"warm serving requires event-time reporting");
-        require(c.warm_sycl_experts=="serial-v1" || ((c.warm_sycl_experts=="grouped-v1" || c.warm_sycl_experts=="packed-strip-v1" || c.warm_sycl_experts=="mmvq-soa-v1") && c.warm_experts && c.warm_packed_gu),"unadmitted warm SYCL expert path");
+        require(c.warm_sycl_experts=="serial-v1" || ((c.warm_sycl_experts=="grouped-v1" || c.warm_sycl_experts=="packed-strip-v1" || c.warm_sycl_experts=="mmvq-soa-v1" || c.warm_sycl_experts=="mmvq-soa-v2" || c.warm_sycl_experts=="mmvq-soa-v3") && c.warm_experts && c.warm_packed_gu),"unadmitted warm SYCL expert path");
         require(!c.warm_packed_gu || c.warm_experts,"packed gate/up without warm mode");
         require(c.warm_sycl_attention=="scalar-v1" || (c.warm_sycl_attention=="subgroup32-v1" && c.warm_experts),"unadmitted warm SYCL attention path");
         require(c.warm_dense_owner=="split-v1" || (c.warm_dense_owner=="hip-v1" && c.warm_measure),"unadmitted warm dense owner");
         require(c.warm_hip_schedule=="baseline-v1" || (c.warm_hip_schedule=="queued-v1" && c.warm_experts),"unadmitted HIP schedule");
+        require(c.warm_expert_issue=="off" || c.warm_expert_issue=="early-v1","unknown expert issue mode");
+        require((c.warm_expert_issue=="off" && !c.warm_expert_timeline_limit) ||
+                (c.warm_experts && c.warm_dense_owner=="hip-v1" && c.warm_hip_schedule=="queued-v1" &&
+                 c.warm_hip_dense=="off" && c.dump_s.empty()),
+                "expert issue/timeline requires warm HIP cut0 queued, graphs off and no dumps");
+        require(c.warm_hip_experts=="serial-v1" || ((c.warm_hip_experts=="layer-batch-v1" || c.warm_hip_experts=="soa-v2") && c.warm_experts &&
+                c.warm_hip_schedule=="queued-v1" && c.hip_expert_math=="per32-v1" && c.warm_hip_dense=="off" && c.dump_s.empty()),
+                "HIP layer batching requires warm experts, queued-v1, per32 math, no graphs or substep dumps");
+        require(c.warm_engram=="off" || (c.warm_engram=="read-ahead-v1" && c.warm_experts && c.warm_dense_owner=="hip-v1"),"Engram read-ahead requires warm HIP dense ownership");
         require(!c.warm_kernel_timing || c.warm_measure,"kernel timing requires warm measurement");
+        require(c.warm_hip_gemv=="off" || ((c.warm_hip_gemv=="q5-sums-v1" || c.warm_hip_gemv=="q5-sums-w4-v1") &&
+                c.warm_experts && c.warm_dense_owner=="hip-v1" && c.warm_hip_schedule=="queued-v1" && c.warm_hip_dense=="off" && c.dump_s.empty()),
+                "HIP dense GEMV requires warm HIP dense, queued-v1, no graphs or substep dumps");
         require(c.warm_hip_dense=="off" || (c.warm_hip_dense=="graphs-v1" && c.warm_experts &&
                 c.warm_hip_schedule=="queued-v1" && !c.warm_kernel_timing && c.dump_s.empty()),
                 "HIP dense graphs require warm experts, queued-v1, no substep dumps or per-kernel events");
+        require(c.warm_hip_fuse=="off" || ((c.warm_hip_fuse=="small-v1" || c.warm_hip_fuse=="attention-v1" || c.warm_hip_fuse=="all-v1") &&
+                c.warm_experts && c.warm_hip_schedule=="queued-v1" && c.warm_hip_dense=="off" && c.dump_s.empty()),
+                "HIP fusion requires warm experts, queued-v1, no graphs or substep dumps");
 #ifndef STRATA_FORK_WARM
-        require(!c.warm_experts && c.warm_dense_owner=="split-v1" && !c.warm_kernel_timing && c.warm_hip_dense=="off","warm serving requires STRATA_FORK_WARM build");
+        require(c.warm_hip_gemv=="off" && c.warm_engram=="off" && !c.warm_experts && c.warm_dense_owner=="split-v1" && !c.warm_kernel_timing && c.warm_hip_dense=="off" && c.warm_hip_fuse=="off","warm serving requires STRATA_FORK_WARM build");
 #endif
         return c;
     }

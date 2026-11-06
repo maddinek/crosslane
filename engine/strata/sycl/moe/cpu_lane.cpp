@@ -33,6 +33,7 @@ int physical_cores(){
 class Lane final:public CpuLane {
     const WeightSource& ws_;uint32_t first_,end_;int workers_;
     std::string dispatch_;bool timing_,batch_=false;
+    unsigned prefetch_rows_=0;
     std::unique_ptr<RowTeam> team_;
 #ifdef STRATA_FORK_WARM
     std::shared_ptr<WarmStore> store_;
@@ -44,6 +45,28 @@ class Lane final:public CpuLane {
     CpuPhases counters()const{return {calls_,read_bytes_,read_ns_,q1_ns_,gu_ns_,q2_ns_,down_ns_,total_ns_,kernel_thread_ns_,dispatch_outer_ns_,completion_wait_ns_};}
     uint64_t now()const{return timing_||decode_active_?clock_ns():0;}
     std::mutex mutex_;
+    static void prefetch(const uint8_t* w,size_t stride,int first,int end) {
+        for(int r=first;r<end;++r)for(size_t b=0;b<stride;b+=64)
+            __builtin_prefetch(w+size_t(r)*stride+b,0,3);
+    }
+    void gate_up(const gg::IqCpu& f,const uint8_t* g,const uint8_t* u,const void* const* a,float* const* h,int lo,int hi,float limit) {
+        if(!prefetch_rows_){gg::iq_cpu_gate_up(f,g,u,a,1,h,lo,hi,limit);return;}
+        // Bounded lookahead within this worker's assigned rows. Four-row
+        // calls keep each dot/fold/libm operation identical; no new layout.
+        const int lead=int(prefetch_rows_);
+        prefetch(g,f.gu_row,lo,std::min(hi,lo+lead));prefetch(u,f.gu_row,lo,std::min(hi,lo+lead));
+        for(int r=lo;r<hi;r+=4){
+            prefetch(g,f.gu_row,std::min(hi,r+lead),std::min(hi,r+lead+4));
+            prefetch(u,f.gu_row,std::min(hi,r+lead),std::min(hi,r+lead+4));
+            gg::iq_cpu_gate_up(f,g,u,a,1,h,r,std::min(hi,r+4),limit);
+        }
+    }
+    void down(const gg::IqCpu& f,const uint8_t* d,const void* const* a,float* const* y,int lo,int hi) {
+        if(!prefetch_rows_){gg::iq_cpu_down(f,d,a,1,y,lo,hi);return;}
+        const int lead=int(prefetch_rows_);prefetch(d,f.d_row,lo,std::min(hi,lo+lead));
+        for(int r=lo;r<hi;r+=4){prefetch(d,f.d_row,std::min(hi,r+lead),std::min(hi,r+lead+4));
+            gg::iq_cpu_down(f,d,a,1,y,r,std::min(hi,r+4));}
+    }
     template<class F>void dispatch_rows(int n,F f){
         if(team_){team_->rows(n,f,(timing_||decode_active_)?&completion_wait_ns_:nullptr);return;}
         constexpr int RB=64;int jobs=(n+RB-1)/RB,nt=std::min(workers_,jobs);
@@ -84,6 +107,9 @@ public:
             batch_=std::string_view(v)=="1";
         }
         need(!batch_||dispatch_=="pool-v1","CPU layer batch requires pool-v1");
+        prefetch_rows_=cpu_option("DS4_CPU_PREFETCH_ROWS",32);
+        need(!prefetch_rows_||prefetch_rows_%4==0,"CPU prefetch lead must be a multiple of four rows");
+        need(!cpu_option("DS4_CPU_SPIN_US",200)||dispatch_=="pool-v1","CPU spin requires pool-v1");
         need(first<end&&end<=uint32_t(ws.meta().nl)&&threads>=0,"row2 CPU layer/thread range");need(workers_>0&&workers_<=int(std::max(1u,std::thread::hardware_concurrency())),"row2 CPU thread count exceeds host");
         need(ws.meta().dim>0&&ws.meta().ff>0&&ws.meta().n_exp>0&&std::isfinite(ws.meta().lim),"row2 CPU model geometry/limit");
         // Admission checks every expert before any execution; no eagerly loaded multi-GB weight store.
@@ -102,6 +128,7 @@ public:
 #endif
         std::fprintf(stderr,"AIOPT_CPU_DISPATCH version=%s first=%u end=%u workers=%d persistent_threads=%zu timing=%d\n",dispatch_.c_str(),first_,end_,workers_,team_?team_->background_threads():size_t(0),int(timing_));
         if(batch_)std::fprintf(stderr,"AIOPT_CPU_LAYER_BATCH version=1 shared_input_quant=1 row_block=64 workers=%d\n",workers_);
+        if(prefetch_rows_||cpu_option("DS4_CPU_SPIN_US",200))std::fprintf(stderr,"AIOPT_CPU_CANDIDATE prefetch_rows=%u spin_us=%u\n",prefetch_rows_,cpu_option("DS4_CPU_SPIN_US",200));
     }
     ~Lane()override{
         if(timing_)std::fprintf(stderr,"AIOPT_CPU_TIMING {\"schema\":\"cpu-lane-timing-v1\",\"dispatch\":\"%s\",\"first\":%u,\"end\":%u,\"workers\":%d,\"scope\":\"lane-lifetime-including-prefill\",\"completed_experts\":%llu,\"thread_spawns\":%llu,\"logical_expert_read_bytes\":%llu,\"read_ns\":%llu,\"quant1_ns\":%llu,\"gate_up_wall_ns\":%llu,\"quant2_ns\":%llu,\"down_wall_ns\":%llu,\"row_kernel_thread_sum_ns\":%llu,\"dispatch_outside_kernel_envelope_ns\":%llu,\"expert_wall_ns\":%llu}\n",
@@ -133,11 +160,11 @@ public:
         std::vector<float> h(size_t(g.ff)),y(size_t(g.dim));tick=now();gg::iq_cpu_quant(f.gu_act,x.data(),g.dim,aq.data());q1_ns_+=now()-tick;
         const void* ap[1]={aq.data()};float* hp[1]={h.data()};
         tick=now();
-        rows(g.ff,[&](int a,int b){gg::iq_cpu_gate_up(f,weights[0],weights[1],ap,1,hp,a,b,g.lim);});
+        rows(g.ff,[&](int a,int b){gate_up(f,weights[0],weights[1],ap,hp,a,b,g.lim);});
         gu_ns_+=now()-tick;tick=now();
         gg::iq_cpu_quant(f.d_act,h.data(),g.ff,hq.data());q2_ns_+=now()-tick;const void* qp[1]={hq.data()};float* yp[1]={y.data()};
         tick=now();
-        rows(g.dim,[&](int a,int b){gg::iq_cpu_down(f,weights[2],qp,1,yp,a,b);});
+        rows(g.dim,[&](int a,int b){this->down(f,weights[2],qp,yp,a,b);});
         down_ns_+=now()-tick;
         for(float v:y)need(std::isfinite(v),"row2 CPU nonfinite output");
         ++calls_;total_ns_+=now()-begin;
@@ -212,9 +239,9 @@ public:
                 const int lo=int(1+task/jobs.size())*64;fn(i,lo,std::min(n,lo+64));
             });
         };
-        auto tick=now();phase(g.ff,[&](size_t i,int a,int b){auto& j=jobs[i];const void* ap[]={j.aq};float* hp[]={j.h.data()};gg::iq_cpu_gate_up(j.f,j.w[0],j.w[1],ap,1,hp,a,b,g.lim);});gu_ns_+=now()-tick;
+        auto tick=now();phase(g.ff,[&](size_t i,int a,int b){auto& j=jobs[i];const void* ap[]={j.aq};float* hp[]={j.h.data()};gate_up(j.f,j.w[0],j.w[1],ap,hp,a,b,g.lim);});gu_ns_+=now()-tick;
         tick=now();for(auto& j:jobs)gg::iq_cpu_quant(j.f.d_act,j.h.data(),g.ff,j.hq.data());q2_ns_+=now()-tick;
-        tick=now();phase(g.dim,[&](size_t i,int a,int b){auto& j=jobs[i];const void* qp[]={j.hq.data()};float* yp[]={out[i].data()};gg::iq_cpu_down(j.f,j.w[2],qp,1,yp,a,b);});down_ns_+=now()-tick;
+        tick=now();phase(g.dim,[&](size_t i,int a,int b){auto& j=jobs[i];const void* qp[]={j.hq.data()};float* yp[]={out[i].data()};down(j.f,j.w[2],qp,yp,a,b);});down_ns_+=now()-tick;
         for(const auto& row:out)for(float v:row)need(std::isfinite(v),"CPU batch nonfinite output");
         calls_+=ids.size();total_ns_+=now()-begin;
 #ifdef STRATA_FORK_WARM

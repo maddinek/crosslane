@@ -29,23 +29,15 @@ issue or PR.
 
 ## Where to help
 
-Ranked by expected gain on the reference machine (≈47–52 ms/token today):
+Ranked by expected gain on the reference machine (39.1 ms/token today, 33.3 ms is the goal):
 
-1. **R9700 dense kernels** (~22 ms/token, the biggest part). Matrix-vector products are ~12 ms against a
-   stream bound of ~8 ms; the rest is small attention, mixing and routing kernels. HIP graph replay was
-   measured slower on ROCm at batch 1 (see DEAD_ENDS). Fusing small kernels saves under 1 ms so far.
-2. **Engram reads** (~5–17 ms/token, very noisy). Two layers read 48 rows per token from 103 GB of tables,
-   though an answer touches only about 81 MB of rows. A small exact row cache is being tested.
-3. **Expert kernels on all three lanes** (~14.5 ms joined, balanced). They are far from memory bandwidth
-   on the GPUs. CPU lane: 8 workers are about as fast as 16, so memory-side work is more likely to help.
-4. **Placement that knows about batching.** Batch cost is non-linear, and the current optimizer uses averages.
-5. **Speculative decoding.** Modelled at about 1.1× today, because a 2-token verify nearly doubles the expert
-   work. How dense scales at batch 2 is unmeasured, and it decides this.
-6. **Other hardware.** Two AMD cards, AMD + NVIDIA, Intel + NVIDIA, other MoE models (GLM, MiniMax,
-   Qwen MoE). The placement and three-lane runtime are model-agnostic; the kernels cover IQ2_XXS,
-   IQ2_XS and IQ1_M today.
-7. **Quality at long outputs.** Many answers run into the token cap while still reasoning. Better
-   stopping or a thinking budget would cut time-to-working-code more than raw tok/s.
+1. **R9700 matrix-vector kernels** (about 11.7 of 22 ms of dense). Big projections are already near the measured stream limit. HIP graph replay, SoA and reordered Q5 sums were measured and didn't help, and fusing small kernels saves under 1 ms. A real new idea here is the only exact lever big enough to matter.
+2. **Speculative decoding with DeepSeek's DSpark drafter.** Projections batch well and byte-exactly. Unmeasured: acceptance on this edited model, full-row dense and expert cost, and the whole cycle. A verify path needs at least 1.5× to be worth building.
+3. **Batched prefill.** An 8,192-token prompt takes about 6 minutes today because it runs token by token. Estimated 38–72 tok/s on exact paths.
+4. **Reaching working code sooner.** Many answers hit the token cap while still reasoning. A lower reasoning effort or better planning could matter more than raw tok/s, but it has to keep quality.
+5. **Placement that knows about batching and co-selection.** Batch cost is non-linear, and the optimizer uses averages. Estimated under 1 ms, and it overlaps with more VRAM.
+6. **Join and shared-FFN overlap.** Early start proved this was worth about 3.5 ms; ordered timestamps would show what's left.
+7. **Other hardware.** Two AMD cards, AMD + NVIDIA, Intel + NVIDIA. The placement and three-lane ideas transfer; the engine is DeepSeek-specific and the kernels cover IQ2_XXS, IQ2_XS and IQ1_M.
 
 ## Commits
 

@@ -4,6 +4,7 @@
 #include "../fixtures/moe/cpu_lane_fixture.cpp"
 #include "runtime.hpp"
 #include <chrono>
+#include "cpu_real_bench.hpp"
 class BankSource final:public sw::WeightSource {
     sw::ModelMeta meta_;std::map<std::string,sw::TensorInfo> info_;std::string path_;
 public:
@@ -28,6 +29,8 @@ public:
     void embedding_bf16(int32_t,std::span<uint16_t>)const override{throw std::runtime_error("unused");}
 };
 int main(int argc,char** argv)try {
+    if(argc>1&&std::string(argv[1])=="--real")return real_bench(argc,argv);
+    if(argc>1&&std::string(argv[1])=="--check-a2")return cpu_candidate_check(argc,argv);
     need(argc==9,"strata-cpu-lane-bench FIXTURE_DIR FRESH_BANK_FILE KIND BANK_EXPERTS WORKERS REPS ROUNDS TIMERS");
     const int kind=std::stoi(argv[3]),bank=std::stoi(argv[4]),workers=std::stoi(argv[5]),reps=std::stoi(argv[6]),rounds=std::stoi(argv[7]),timers=std::stoi(argv[8]);
     need(kind>=0&&kind<6&&bank>=6&&bank<=64&&workers>0&&workers<=32&&reps>=3&&reps<=10&&rounds>=1&&rounds<=1024&&(timers==0||timers==1),"bench bounds");
