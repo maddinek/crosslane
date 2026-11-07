@@ -6,20 +6,20 @@
 
 | | |
 |---|---|
-| **Speed** | **26.00 tok/s** median (25.40 / 26.00 / 26.13), generating real code. 25.57 tok/s with the code in this repo today |
-| **Against stock** | **2.63×** our recorded stock [Strata](https://github.com/Niko1221/Strata) run on the same machine and model file (9.89 tok/s, one GPU, 16 readers, a 51 GB store). A whole-system comparison, not a kernel A/B |
+| **Speed** | **26.27 tok/s** median over ten answers (25.93–26.42), generating real code. 25.57 tok/s with the code in this repo today |
+| **Against stock** | **2.66×** our recorded stock [Strata](https://github.com/Niko1221/Strata) run on the same machine and model file (9.89 tok/s, one GPU, 16 readers, a 51 GB store). A whole-system comparison, not a kernel A/B |
 | **How exact** | No speculation, no skipped experts, routing algorithm unchanged. Tested kernel and schedule modes are byte-identical at a fixed placement over 581 teacher-forced positions; placement changes alter results slightly (see below) |
-| **Fastest working code** | **285 s** at 26.13 tok/s (a newer setup, see below), passing its own 10 tests and independent checks. Includes prefill, excludes engine load |
+| **Does it write working code?** | **6 of 10 answers passed strict** with room up to 11,900 tokens, working code in 292–439 s. Includes prefill, excludes engine load |
 | **Hardware** | Radeon AI PRO R9700 32 GB, Arc Pro B65 32 GB, Ryzen 9 9950X3D, 128 GB DDR5 |
 | **Goal** | 30 tok/s. **Not reached yet**; see [what's left](#whats-left) |
 
-**Why this exists:** GPUs are painfully expensive right now, and a lot of us run whatever we could get, often a mix nobody optimises for. This is one person's attempt to get the most out of the hardware they already have, shared so others can use it or share what worked on theirs. Different GPUs, different models and failures are all welcome.
+**Why this exists:** GPUs are painfully expensive right now, and a lot of us run whatever we could get, often a mix nobody optimises for. This is one person's attempt to get the most out of the hardware they already have, shared so others can use it or share what worked on theirs. Different GPUs, different models and failures are all welcome. On other GPUs, measure expert service, residency and join time before choosing placement; these gains depend on that balance.
 
 crosslane is a research fork of Strata (pinned at `ffa80d73`, v0.2.10). Neither GPU can hold this model alone, so the active lanes compute that layer's routed experts concurrently, and dense work stays on the R9700.
 
-> **Known bug: the engine leaks host memory.** Anonymous memory grew about 270 KB per generated token at 26 tok/s, and shared memory grew too. Our 128 GB setup hit its memory guard after 59 minutes. It's being tracked down; restart the engine until it's fixed.
+> **If you run ROCm 7.1 and memory keeps growing, try 7.2.1.** On Fedora's `rocm-hip-7.1.1-3.fc44`, our fork's anonymous memory grew about 270 KB per generated token, and the run hit its guard after 59 minutes. Stock Strata also showed memory growth, at a different rate. Allocation stacks pointed at ROCm's profiling signals and timestamps. Running the same binaries on AMD's ROCm 7.2.1 libraries from a private folder, no install and no driver change, gave byte-identical output over 581 teacher-forced positions and flat memory across ten answers. See [the steps](docs/BUILD.md#rocm-721-without-installing-it).
 >
-> **Status: research code, tested on one machine.** The public sources are a16 (25.57 tok/s), run under our private safety guards. The a17 sources behind 26.00 tok/s, 285 s and the 4-of-7 quality result aren't exported yet. The standalone build, pack and benchmark scripts have passed CPU tests but **haven't yet run end to end on GPUs**. Expect to read code.
+> **Status: research code, tested on one machine.** The public sources are a16 (25.57 tok/s), run under our private safety guards. The a17 sources behind 26.27 tok/s and the 6-of-10 quality result aren't exported yet. The standalone build, pack and benchmark scripts have passed CPU tests but **haven't yet run end to end on GPUs**. Expect to read code.
 
 ## How it works
 
@@ -76,7 +76,8 @@ Realistic task: one 325-token prompt asking for a complete Python module with te
 | a14r | R9700 expert batching + rebalance | 21.27 | 2/3 |
 | a15r | Parallel Engram reads + rebalance | 22.57 | 0/3 |
 | a16r | Faster combine, early expert start + rebalance | 25.57 | 0/3 |
-| **a17 + VRAM** | **Batched SwiGLU, small kernel fusion, Engram priority, 512 MiB less GPU reserve + rebalance** | **26.00** | **1/3** |
+| a17 + VRAM | Batched SwiGLU, small kernel fusion, Engram priority, 512 MiB less GPU reserve + rebalance | 26.00 | 1/3 |
+| **a17 + VRAM, ROCm 7.2.1** | **Same setup on the newer runtime, ten answers at 11,900 tokens** | **26.27** | **6/10** |
 
 ### Where a token goes now
 
@@ -91,13 +92,11 @@ Realistic task: one 325-token prompt asking for a complete Python module with te
 
 ### Does it write working code?
 
-**4 of 7 answers passed strict with room up to 11,900 tokens** (a17 + VRAM setup, median 26.04 tok/s, working code in 295–418 s). At the old 8,192 cap only 2 of the same 7 would have passed, so the cap was hiding working answers. That test was planned for 10 answers and stopped at 7 on the memory leak above, so it's a rough number (about 25–84%), and there's no stock comparison yet. It can't show whether we've lost quality.
+**6 of 10 answers passed strict with room up to 11,900 tokens** (a17 + VRAM setup on ROCm 7.2.1, median 26.27 tok/s, working code in 292–439 s). At the old 8,192 cap only 3 of the same 10 would have passed, so the cap was hiding working answers. Ten answers on one task is still a rough number (about 31–83%), and there's no stock comparison yet, so it can't show whether we've lost quality. Of the four misses, three finished with code that failed the checks and one hit the cap while still going.
 
 The a16r row:
 
 All three a16r answers hit the 8,192-token cap before finishing, so it scored 0/3. The model reasons for a long time first, and these answers were cut off, not looping. Across our history 43 of 72 comparable answers hit that cap (a descriptive count with repeated streams, not independent trials), so three in a row isn't surprising. That neither shows nor rules out a quality loss.
-
-With room up to 11,900 tokens at the same setup, the one measured answer finished on its own at 25.59 tok/s and passed strict with working code in 295 s. One answer proves little, which is why we ran the larger test above.
 
 Moving experts between devices also changes the numbers slightly, even with exact kernels (top-1 96.6%, mean KL 0.014), most likely because CPU and GPU lanes quantize activations differently. Routes change too (6,295 of 23,240 layer selections differ). So "exact" here means byte-identical logits at a fixed placement, checked over 581 teacher-forced positions for the tested kernel and schedule modes. Different placements are different runs of a very close model, not the same bytes.
 
@@ -109,14 +108,15 @@ Moving experts between devices also changes the numbers slightly, even with exac
 
 ## What's left
 
-30 tok/s needs 33.3 ms per token, 5.8 ms less than today.
+30 tok/s needs 33.3 ms per token, about 4.7 ms less than today.
 
 - **Exact kernels:** our estimate is a plateau around 26–28 tok/s. The remaining levers are small and overlap, and no credible exact route to 30 has shown up yet. Being wrong would be welcome.
-- **DeepSeek's DSpark drafter:** a 1.5× gain would justify building a verify path. So far: checking several rows at once stays byte-identical, and three rows cost 0.34–0.52 of three separate runs on the big matrices. First-slot sampled acceptance was about 82.6% in an offline screen; rollout acceptance and whole-cycle performance remain unmeasured.
+- **DeepSeek's DSpark drafter: parked.** We measured multi-row kernel costs on real captured rows and projected whole-token speed. At 4 draft rows that's 1.52× at best but 1.11× central, against the 1.5× we wanted. The R9700's dense kernels batch very well; expert join and the drafter evicting experts are what hurts, and the B65 and CPU have no multi-row expert kernels yet. No verifier was built.
 - **Re-encoding experts to Q2_K: rejected.** Measured kernels plus a capacity model project 3.18 ms slower per token, with 1,434 experts pushed to the CPU. There was no full-model Q2_K run.
-- **The memory leak**, then the full 10-answer test, then whether a lower reasoning effort reaches working code sooner.
-- **Engram read bursts:** layer 1 sometimes waits on disk with the GPU idle, costing up to 0.8 ms per token.
-- **Prefill:** batching it, estimated at 38–72 tok/s on exact paths.
+- **Reasoning effort:** whether a lower setting reaches working code sooner.
+- **Engram read bursts:** layer 1 sometimes waits on disk with the GPU idle, costing up to 0.87 ms per token in one long run. Doubling the read queue depth to 16 didn't help (25.90 against 26.00 tok/s, same placement and text).
+- **Prefill:** batching it, estimated at about 41 tok/s on exact paths against 22 today, in progress.
+- **Giving the B65 more to do:** moving the shared FFN there as implemented is about 35× slower on layer 1 (1,510 µs against 43 µs), partly because that path still decodes with a scalar loop. The corrected capacity-constrained model projects no central gain; an optimistic unmeasured kernel projects about 1 ms per token, so we stopped there. Better ideas very welcome.
 
 The dead ends are as useful as the wins, so they're in [docs/DEAD_ENDS.md](docs/DEAD_ENDS.md).
 

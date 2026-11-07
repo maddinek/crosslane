@@ -190,6 +190,18 @@ export LD_LIBRARY_PATH="$PWD/build/package:$PWD/build/package/runtime${LD_LIBRAR
 ./build/package/strata-mmvq-accuracy --pack /absolute/models/pack
 ```
 
+## ROCm 7.2.1 without installing it
+
+Fedora's `rocm-hip-7.1.1-3.fc44` retained memory per generated token on this workload. We ran AMD's 7.2.1 userspace from a private folder: no `dnf`, no scriptlets, no driver or kernel change, and the same compiled HIP binaries. It worked on our kernel and card; yours may differ, so check your output against a run you trust.
+
+From `https://repo.radeon.com/rocm/rhel9/7.2.1/main/` take four RPMs: `hip-runtime-amd-7.2.53211.70201-81.el8.x86_64.rpm`, `hsa-rocr-1.18.0.70201-81.el8.x86_64.rpm`, `comgr-3.0.0.70201-81.el8.x86_64.rpm` and `rocprofiler-register-0.6.0.70201-81.el8.x86_64.rpm`. Unpack them without installing, keep `libamdhip64`, `libhsa-runtime64`, `libamd_comgr`, `librocprofiler-register` and the two `libhiprtc` libraries with their SONAME links in one folder, and put that folder first:
+
+```bash
+LD_LIBRARY_PATH=/absolute/rocm-7.2.1:/absolute/package/runtime:/absolute/package ...
+```
+
+Check `/proc/<pid>/maps` to confirm the engine really loaded those files. Plain `hipMemcpy` still grew about 1 KB per copy on 7.2.1 in a small probe, but the decode path doesn't use it.
+
 ## Host policy
 
 The standalone tree has no host profile. `CROSSLANE_B65_GUARD=/path/to/wrapper`
