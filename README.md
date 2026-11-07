@@ -29,26 +29,26 @@ The model is DeepSeek V4.1 Flash 1017: 40 layers, 384 routed experts per layer, 
 flowchart LR
     T[Token] --> D["R9700: all dense work<br/>attention, shared FFN, routing"]
     D --> R{"Route: 6 experts<br/>for this layer"}
-    R --> A["R9700 bank<br/>2,532 experts, 21.6 GB<br/>154.7 picks per token"]
-    R --> B["B65 bank<br/>2,915 experts, 25.0 GB<br/>55.6 picks per token"]
-    R --> C["RAM store, 32 readers<br/>9,913 experts, 102 GB<br/>29.7 picks per token"]
+    R --> A["R9700 bank<br/>2,594 experts, 22.1 GB<br/>156.6 picks per token"]
+    R --> B["B65 bank<br/>2,976 experts, 25.5 GB<br/>53.8 picks per token"]
+    R --> C["RAM store, 32 readers<br/>9,790 experts, 100.6 GB<br/>29.6 picks per token"]
     A --> J["Join and combine<br/>in fixed order"]
     B --> J
     C --> J
     J --> N[Next layer]
 ```
 
-Every device is doing real work, in a different role. The following allocation and service figures are the historical a16r measurement; a17 + VRAM adds expert capacity and rebalances again:
+Every device is doing real work, in a different role. These are pooled decode figures from the ten-answer a17 + VRAM run on ROCm 7.2.1:
 
 | | R9700 | Arc Pro B65 | CPU + RAM |
 |---|---:|---:|---:|
-| Dense work (attention, shared FFN, routing) | all of it, 22 ms | none | none |
-| Expert bank | 2,532 experts, 21.6 GB | **2,915 experts, 25.0 GB, the largest GPU bank** | 9,913 experts, 102 GB |
-| Mean expert picks per token, of 240 | 154.7 | 55.6 | 29.7 |
+| Dense work (attention, shared FFN, routing) | all of it, 23.3 ms | none | none |
+| Expert bank | 2,594 experts, 22.1 GB | **2,976 experts, 25.5 GB, the largest GPU bank** | 9,790 experts, 100.6 GB |
+| Mean expert picks per token, of 240 | 156.6 | 53.8 | 29.6 |
 | Time per pick | 0.05 ms | 0.17 ms | 0.29 ms |
-| Expert work per token | 8.2 ms | **9.6 ms, the longest lane** | 8.7 ms |
+| Expert work per token | 7.8 ms | **9.3 ms, the longest lane** | 8.6 ms |
 
-The R9700 is faster per pick, so the rebalancer gives it the most-used experts, and the B65 and CPU lanes get fewer picks. That brings the lanes' total service close, though individual layers still differ. The B65 runs no dense work: its 9.6 ms of expert service is out of a 39.1 ms token (service time, not a GPU-utilisation measurement). It did in earlier versions, but dense layer 0 took 11.5 ms there against 0.48 ms on the R9700, and moving all dense over, together with a packed-strip B65 kernel, took us from 12.96 to 14.41 tok/s. That's the part of "both GPUs equally involved" we haven't reached.
+The R9700 is faster per pick, so the rebalancer gives it the most-used experts, and the B65 and CPU lanes get fewer picks. That brings the lanes' total service close, though individual layers still differ. The B65 runs no dense work: its 9.3 ms of expert service is out of a pooled 38.2 ms token (service time, not a GPU-utilisation measurement). It did in earlier versions, but dense layer 0 took 11.5 ms there against 0.48 ms on the R9700, and moving all dense over, together with a packed-strip B65 kernel, took us from 12.96 to 14.41 tok/s. That's the part of "both GPUs equally involved" we haven't reached.
 
 What made the difference, in the order we found it:
 
@@ -81,14 +81,16 @@ Realistic task: one 325-token prompt asking for a complete Python module with te
 
 ### Where a token goes now
 
-39.1 ms per token on a16r (a17 + VRAM brings dense excluding Engram regions down to about 21.1 ms):
+38.1 ms is the inverse of the ten-answer median speed. The decode-step-weighted budget below totals 38.17 ms; the averaging and denominators differ slightly.
 
 | Part | ms | |
 |---|---:|---|
-| Dense, excluding Engram layers | 22.15 | Matrix-vector products are over half; large ones already run at 380–618 GB/s of weights against a measured 612 GB/s stream |
-| Engram-containing regions | 1.74 | Includes those layers' other work |
-| Expert join | 11.91 | CPU 8.7, B65 9.6, R9700 8.2 ms of overlapping service |
-| Residual | 3.32 | Wall minus the regions above, not an exclusive breakdown. A separate timed diagnostic found 0.95 ms of small host and copy steps outside dense, join, shared-FFN wait and head |
+| Dense, excluding Engram-containing regions | 21.60 | Includes the head. Prior sampled large GEMV spans moved weights at 380–618 GB/s against a measured 612 GB/s stream |
+| Engram-containing regions | 1.70 | Includes those layers' other work |
+| Expert join | 11.60 | CPU 8.60, B65 9.29, R9700 7.80 ms of overlapping service |
+| Residual | 3.27 | Wall minus the regions above, not an exclusive breakdown or a removable CPU bucket |
+
+The join exceeds the longest total lane by 2.30 ms, but about 0.96 ms comes from different layers having different slowest lanes. The remaining 1.34 ms also includes variability and release offsets; it is not all reclaimable overhead.
 
 ### Does it write working code?
 
@@ -104,7 +106,7 @@ Moving experts between devices also changes the numbers slightly, even with exac
 
 - **Long prompts:** an 8,192-token prefill took 369 s at 22.2 tok/s on the a15r setup, with no slowdown by position. It's one diagnostic stream, token by token, and the weak spot.
 - **Long context:** a 12,001-position run reached 28.5 GB on the R9700 (whole device) and 25.3 GB on the B65, flat with position. Sampling can miss spikes.
-- **Memory:** 21.6 GB and 25.0 GB of expert banks, plus 102 GB preloaded in RAM. Experts never come from disk during decode.
+- **Memory:** 22.1 GB and 25.5 GB of expert banks, plus 100.6 GB preloaded in RAM. Experts never come from disk during decode.
 
 ## What's left
 

@@ -85,6 +85,26 @@ Frozen scorer, independent seeds, one warm-up plus ten measured answers in one p
 
 Median 26.27 tok/s (25.93–26.42). Strict 6/10 (Wilson 95% about 31–83%), 3/10 at 8,192. No reference arm. On the seven answers paired with ROCm 7.1.1 the median speed difference is +0.19 tok/s from one run each, not proven.
 
+## Where a token goes now (a17 + VRAM, ROCm 7.2.1)
+
+The ten-answer median is 26.26749 tok/s (25.92833–26.42386, SD 0.16944),
+whose inverse is 38.06987 ms. Prefill-subtracted, decode-step-weighted counters
+instead total 38.16957 ms; these are different averages/denominators.
+
+| Pooled component | ms per fed decode step |
+|---|---:|
+| Dense excluding entire Engram-containing regions | 21.5956 |
+| Entire Engram-containing regions | 1.7040 |
+| Expert join | 11.5996 |
+| Wall minus the preceding components | 3.2704 |
+
+CPU/B65/R9700 service overlaps: 8.6035 / 9.2950 / 7.7992 ms. The maximum
+of total lane means is 9.2950 ms; summing each layer's maximum mean gives
+10.2565 ms. Thus 0.9616 ms of the apparent join gap is changing slowest lanes,
+and even the remaining 1.3430 ms includes variability and release offsets.
+It is not a measured removable overhead budget. Current banks hold 2,594 HIP,
+2,976 B65 and 9,790 preloaded CPU experts.
+
 ## Where a token goes (a16r)
 
 Decode-only per fed token, pooled over three answers: wall 39.124 ms; dense excluding Engram-containing regions
