@@ -1,0 +1,31 @@
+{
+  "checked_utc": "2026-11-07",
+  "metadata_url": "https://repo.radeon.com/rocm/rhel9/7.2.1/main/repodata/810431394fb1a06dc114e37bc9a5df868bdf43ea77c8cecde08af6be36f40097-primary.xml.gz",
+  "metadata_sha256": "810431394fb1a06dc114e37bc9a5df868bdf43ea77c8cecde08af6be36f40097",
+  "packages": [
+    {
+      "name": "comgr",
+      "url": "https://repo.radeon.com/rocm/rhel9/7.2.1/main/comgr-3.0.0.70201-81.el8.x86_64.rpm",
+      "sha256": "1d1487605dfc0627b897273693092dcb6dde6b90b8b68b17efc19af39450207b",
+      "bytes": 49623244
+    },
+    {
+      "name": "hip-runtime-amd",
+      "url": "https://repo.radeon.com/rocm/rhel9/7.2.1/main/hip-runtime-amd-7.2.53211.70201-81.el8.x86_64.rpm",
+      "sha256": "dce6257e4278d5c1dbac9afb98f8c54e5054d79e946a15f5b077356a39c3bdff",
+      "bytes": 10599240
+    },
+    {
+      "name": "hsa-rocr",
+      "url": "https://repo.radeon.com/rocm/rhel9/7.2.1/main/hsa-rocr-1.18.0.70201-81.el8.x86_64.rpm",
+      "sha256": "53e6c0e7e5be31c88162c25bf7ddf51302e5a2d3cdeba1a0ffc0c4e124abdb83",
+      "bytes": 846436
+    },
+    {
+      "name": "rocprofiler-register",
+      "url": "https://repo.radeon.com/rocm/rhel9/7.2.1/main/rocprofiler-register-0.6.0.70201-81.el8.x86_64.rpm",
+      "sha256": "cc8f4defaa5731e868625b343d4c9471280bf878b1816aafd20176798f544db5",
+      "bytes": 323936
+    }
+  ]
+}

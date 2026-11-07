@@ -1,0 +1,40 @@
+{
+  "dimensions": [
+    40,
+    384
+  ],
+  "profile_sha256": "30c6ed93a82a37e2fd4f46d676f62655cbd2f17dbc59a1c73769bbd8a790eb74",
+  "text_sha256": {
+    "profile-counts.txt": "91cc960f86a802a3dff1eb18d74575e89b43633cfc58f9cb78934784fd57f284",
+    "placement.txt": "ce73f51b3606d812cd956076f348ab0d6043ff411b6dfdcf573deb39be13c167"
+  },
+  "model_files": [
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
+      "bytes": 39075714624,
+      "sha256": "d46efb67ccffd8fb5d7f18b423896381b9e06d8491e161c370ddf3b05b07e050"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00004.gguf",
+      "bytes": 39388449504,
+      "sha256": "cec1b2c3da429dc768b8bb9bc4dc4403d81f74d34db660a6a34ee3e555bf2c70"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00003-of-00004.gguf",
+      "bytes": 39246891616,
+      "sha256": "9d9c2140fcb134a0b9a74dedd0e5167e68077af6d08ce7f856bce112f0a35dd3"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00004-of-00004.gguf",
+      "bytes": 20527837312,
+      "sha256": "92e1b7aac2c27451977f093b89207a877221bba909424309450420f66fa42bf9"
+    },
+    {
+      "name": "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+      "bytes": 110595290816,
+      "sha256": "3dac4c54893ad7aa89103c0028500eadc78e74112cef3a2930a97e67dc9fb4f3"
+    }
+  ],
+  "source_revision": "eee64280b9f50cf02c2ad427a0294cdb5b431bc9",
+  "scope": "a17 VRAM-rebalanced placement used for the ten-answer ROCm 7.2.1 result; public entrypoints not GPU-tested."
+}

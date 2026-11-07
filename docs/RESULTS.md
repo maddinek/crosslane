@@ -1,5 +1,12 @@
 # Results
 
+The exported runtime sources now include a17 and the VRAM-rebalanced placement
+behind the ROCm 7.2.1 ten-answer result. `--preset a17` selects that execution
+setup; `--preset a16` remains available. The standalone public build, pack,
+staging and benchmark workflow has CPU tests and has never run end to end on
+GPUs. Its three-answer/8,192-token request protocol differs from the ten-answer
+quality study below. [Source provenance](SOURCE.md), [build steps](BUILD.md).
+
 Hardware: AMD Radeon AI PRO R9700 (32 GB, HIP/ROCm), Intel Arc Pro B65 (32 GB, SYCL/oneAPI 2026.1,
 driver 1.17.39758), Ryzen 9 9950X3D, 128 GB DDR5, both GPUs on PCIe 5.0 ×8.
 Model: DeepSeek V4.1 Flash GSQ-RCO IQ2_XXS pack (40 layers, 384 routed experts, 6 per token,

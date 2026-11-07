@@ -63,6 +63,7 @@ class PackSource final : public WeightSource {
     // Budget is per WeightSource; native cut0 has one reader source (HIP).
     std::vector<std::unique_ptr<EngramCache>> eg_cache_;
     unsigned eg_qd_=0;
+    mutable uint64_t eg_request_=0,eg_position_=UINT64_MAX;
     mutable std::unique_ptr<EngramParallel> eg_pool_;
     mutable std::once_flag eg_pool_once_;
     std::vector<std::unique_ptr<Fd>> eg_fds_;
@@ -184,6 +185,7 @@ public:
         geo();
         engram();
         eg_qd_=unsigned(engram_env("AIOPT_ENGRAM_QD",16));
+        require((!opt_.engram_priority && !opt_.engram_trace_limit) || eg_qd_>1,"Engram scheduling requires parallel QD");
         const auto random=engram_env("AIOPT_ENGRAM_RANDOM",1);
         const auto extents=engram_env("AIOPT_ENGRAM_EXTENTS",1);
         if(random||extents) {
@@ -278,7 +280,11 @@ public:
         io_ns_[role].fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-begin).count()));
     }
     int engram_format(int li) const override { return eg_fmt_.at(size_t(li)); }
+    void engram_token(uint64_t request,uint64_t position) const override {eg_request_=request;eg_position_=position;}
     void engram_rows(int li, std::span<const uint64_t> ids, std::span<std::byte> dst) const override {
+        engram_rows_scheduled(li,ids,dst,{});
+    }
+    void engram_rows_scheduled(int li,std::span<const uint64_t> ids,std::span<std::byte> dst,const std::function<void()>& queued) const override {
         if(eg_qd_>1)std::call_once(eg_pool_once_,[&]{eg_pool_=std::make_unique<EngramParallel>(eg_qd_);});
         const int cols = g_.eg_cols(), hd = g_.eg_hd, fmt = engram_format(li);
         require(fmt >= 0, "Engram table format not admitted");
@@ -339,8 +345,9 @@ public:
                 }
             }
         };
-        if(eg_pool_)eg_pool_->run(size_t(cols),row);
-        else for(int c=0;c<cols;++c)row(size_t(c));
+        if(eg_pool_)eg_pool_->run(size_t(cols),row,
+            {eg_request_,eg_position_,g_.eg_layers[size_t(li)],eg_position_<opt_.engram_trace_limit,opt_.engram_priority},queued);
+        else {if(queued)queued();for(int c=0;c<cols;++c)row(size_t(c));}
     }
     void embedding_bf16(int32_t token, std::span<uint16_t> dst) const override {
         const TensorInfo t = require_tensor("embed.weight");

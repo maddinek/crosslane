@@ -88,7 +88,9 @@ in place from the public shards. Keep the shards at their recorded locations.
 
 ```sh
 ./tools/bench.sh --pack /absolute/models/pack
-# Frozen a16r placement and execution modes (reference model/hardware only):
+# Latest a17 + VRAM setup (stage ROCm 7.2.1 below first):
+./tools/bench.sh --pack /absolute/models/pack --preset a17 --out bench-a17
+# Earlier a16r placement and execution modes (reference model/hardware only):
 ./tools/bench.sh --pack /absolute/models/pack --preset a16 --out bench-a16
 # Alternative expert kernel (different reduction order, opt-in):
 ./tools/bench.sh --pack /absolute/models/pack --sycl-experts mmvq-soa-v1 --out bench-out-mmvq
@@ -105,6 +107,36 @@ config, argv/environment, metadata/package/profile hashes, chosen plan,
 responses, generated code text and `summary.json`. Completed decode steps per
 second are reported separately. A length-capped answer counts for speed; it
 can still be unusable. This entrypoint does not score generated code.
+
+`--preset a17` adds batched SwiGLU (`batch-v1`), `small-v1` HIP fusion,
+`first-v1` Engram priority and the VRAM-rebalanced placement to the a16 modes
+below. Its fixed planner reserves are 992,494,592 bytes on AMD and 2,684,354,560
+bytes on Intel (512 MiB less on each); physical caps stay 30,450,647,040 and
+28,500,000,000 bytes. These reserves were qualified only on the reference card
+pair. Explicit memory overrides require a newly qualified placement.
+
+It verifies the six ROCm 7.2.1 ELFs and SONAME links under
+`build/rocm-7.2.1` (or `--rocm-runtime /absolute/folder`) and puts that directory
+first in `LD_LIBRARY_PATH`, before package/runtime and package. An absent or
+changed ELF refuses before native work. Inherited `DS4_*` and
+`AIOPT_ENGRAM_*` switches are replaced just as for a16. The preset's model-file
+hashes, profile counts and placement are in `presets/a17/metadata.json`:
+
+| Input | SHA256 |
+|---|---|
+| Reconstructed profile | `30c6ed93a82a37e2fd4f46d676f62655cbd2f17dbc59a1c73769bbd8a790eb74` |
+| Placement | `ce73f51b3606d812cd956076f348ab0d6043ff411b6dfdcf573deb39be13c167` |
+
+The source export is `eee64280b9f50cf02c2ad427a0294cdb5b431bc9`;
+its runtime source hashes match the a17 package table at the
+`7e98e828176a99e53a2975e9814d9b660c1d1ca2` lineage. See
+[SOURCE.md](SOURCE.md). `tests/fixtures/a17-runtime.json` independently records
+the measured launch modes and budgets. The public command still runs one
+warm-up plus **three answers at 8,192 tokens**, using cumulative counters.
+The 26.27 tok/s / 6-of-10 result used **ten independent-counter answers at
+11,900 tokens**; this preset reproduces its execution setup, not that quality
+protocol, scorer or a throughput guarantee. Neither public preset has run
+end to end on GPUs.
 
 The default `--preset baseline` preserves the original benchmark: uniform
 profile (unless supplied), native default placement, packed-strip B65 experts,
@@ -132,7 +164,7 @@ Use the exact GGUF files identified in `presets/a16/metadata.json`. The wrapper
 checks dimensions, text hashes and the canonical prompt IDs; it does **not**
 hash all model weights on each launch. Verify the model checksums separately.
 A different model with the same dimensions is not the reference model.
-The a16 preset rejects custom `--profile`, `--placement` or another B65 kernel;
+Both reference presets reject custom `--profile`, `--placement` or another B65 kernel;
 use baseline for those inputs. Non-reference hardware needs new measured
 placement and memory qualification, not these frozen counts.
 
@@ -194,10 +226,30 @@ export LD_LIBRARY_PATH="$PWD/build/package:$PWD/build/package/runtime${LD_LIBRAR
 
 Fedora's `rocm-hip-7.1.1-3.fc44` retained memory per generated token on this workload. We ran AMD's 7.2.1 userspace from a private folder: no `dnf`, no scriptlets, no driver or kernel change, and the same compiled HIP binaries. It worked on our kernel and card; yours may differ, so check your output against a run you trust.
 
-From `https://repo.radeon.com/rocm/rhel9/7.2.1/main/` take four RPMs: `hip-runtime-amd-7.2.53211.70201-81.el8.x86_64.rpm`, `hsa-rocr-1.18.0.70201-81.el8.x86_64.rpm`, `comgr-3.0.0.70201-81.el8.x86_64.rpm` and `rocprofiler-register-0.6.0.70201-81.el8.x86_64.rpm`. Unpack them without installing, keep `libamdhip64`, `libhsa-runtime64`, `libamd_comgr`, `librocprofiler-register` and the two `libhiprtc` libraries with their SONAME links in one folder, and put that folder first:
+The exact AMD RPM URLs, sizes and SHA256 hashes are pinned in
+`tools/rocm-7.2.1/packages.json`; the six extracted ELFs are pinned in
+`elf-manifest.json` beside it. Download those four RPMs, then extract without
+installing or running package scripts:
 
-```bash
-LD_LIBRARY_PATH=/absolute/rocm-7.2.1:/absolute/package/runtime:/absolute/package ...
+```sh
+mkdir -p build/rocm-rpms
+.venv/bin/python - <<'PYCODE'
+import json
+from pathlib import Path
+from urllib.request import urlretrieve
+for row in json.loads(Path('tools/rocm-7.2.1/packages.json').read_text())['packages']:
+    urlretrieve(row['url'], Path('build/rocm-rpms') / row['url'].rsplit('/', 1)[1])
+PYCODE
+.venv/bin/python tools/stage_rocm.py --downloads build/rocm-rpms --destination build/rocm-7.2.1
+```
+
+The destination must be fresh. Staging verifies every RPM before extraction,
+then each ELF and SONAME link. It does not execute the libraries or change the
+host. The a17 benchmark verifies them again before launch. For another tool,
+put the staged directory first:
+
+```sh
+export LD_LIBRARY_PATH="$PWD/build/rocm-7.2.1:$PWD/build/package/runtime:$PWD/build/package"
 ```
 
 Check `/proc/<pid>/maps` to confirm the engine really loaded those files. Plain `hipMemcpy` still grew about 1 KB per copy on 7.2.1 in a small probe, but the decode path doesn't use it.

@@ -2,6 +2,7 @@
 // gg::mv and swiglu are upstream's DS4_SYNC path. Arena owns all device lifetimes.
 #pragma once
 #include "hip_resident.hpp"
+#include <climits>
 #include "ds4_gguf.cuh"
 #include "ds4_kernels.cuh"
 #include "hip_q8k.hpp"
@@ -22,7 +23,7 @@ class HipResidentBank {
     // ever refers to a temporary host vector owned by warm_compute_many.
     std::vector<float> batch_input_, batch_output_;
     size_t batch_count_ = 0;
-    bool soa_ = false;
+    bool soa_ = false, swiglu_batch_ = false;
     int8_t* soa_quant_ = nullptr;
     float* soa_scale_ = nullptr;
     uint32_t* soa_tables_ = nullptr;
@@ -34,7 +35,7 @@ class HipResidentBank {
     uint64_t uploaded_ = 0, hits_ = 0, workspace_ = 0;
     bool ready_ = false;
 public:
-    template<class Arena> void load(const WeightSource& ws, const HipResidency& r, Arena& arena, hipStream_t stream, bool layer_batch = false, bool soa = false) {
+    template<class Arena> void load(const WeightSource& ws, const HipResidency& r, Arena& arena, hipStream_t stream, bool layer_batch = false, bool soa = false, bool swiglu_batch = false) {
         namespace gg = strata::ds4::gguf;
         require(matrices_.empty(), "resident bank already loaded");
         const bool pooled=pooled_policy(r.policy);
@@ -42,6 +43,9 @@ public:
         matrices_.resize(r.slots.size());
         cpu_q8k_ = r.cpu_q8k;
         require(!soa || (layer_batch && ws.meta().k_exp<=hipex::max_jobs/2), "SoA requires layer batch within job capacity");
+        require(!swiglu_batch || (layer_batch && !soa),"batch SwiGLU requires AoS layer batching");
+        require(!swiglu_batch || (ws.meta().k_exp>0 && ws.meta().ff>0 && ws.meta().ff <= INT_MAX/ws.meta().k_exp),"batch SwiGLU extent overflow");
+        swiglu_batch_=swiglu_batch;
         soa_ = soa;
         if(soa_)for(const char* key:{"DS4_QUANT_NODEDUP","DS4_QUANT_SINGLE","DS4_IQ_Q8K"})
             require(!std::getenv(key),std::string("HIP SoA requires unset ")+key);
@@ -133,6 +137,7 @@ public:
         require(arena.bytes - start == r.allocated && uploaded_ == r.payload, "resident allocation/upload accounting differs");
         if(soa_)std::fprintf(stderr,"AIOPT_HIP_EXPERT_KERNEL layout=soa-v2 weight_bytes=%llu workspace_bytes=%llu codebook_bytes=%zu\n",
             (unsigned long long)r.allocated,(unsigned long long)workspace_,mmvq::table_words*sizeof(uint32_t));
+        if(swiglu_batch_)std::fprintf(stderr,"AIOPT_HIP_SWIGLU mode=batch-v1\n");
         ready_=true; // no partially loaded bank can serve a hit
     }
     void expert(uint32_t layer, int slot, const float* x, float* y, const ModelMeta& g, hipStream_t stream) {
@@ -211,7 +216,9 @@ public:
             require(gg::mv(jobs,int(n),stream), "HIP batch gate/up failed");
         }
         trace("gate_up_including_quant",stream);
-        for(size_t i=0;i<slots.size();++i)
+        if(swiglu_batch_)
+            strata::ds4::swiglu(gate_,up_,g.ff*int(slots.size()),g.lim,hidden_,stream);
+        else for(size_t i=0;i<slots.size();++i)
             strata::ds4::swiglu(gate_+i*size_t(g.ff),up_+i*size_t(g.ff),g.ff,g.lim,hidden_+i*size_t(g.ff),stream);
         trace("swiglu",stream);
         for(size_t first=0;first<slots.size();first+=jobs_max) {
@@ -231,6 +238,10 @@ public:
     std::span<const float> layer_output() const {
         return {batch_output_.data(),batch_count_*batch_input_.size()};
     }
+    // Checker toggles the identical loaded bank; production sets it only at load.
+    void set_swiglu_batch(bool value) {
+        require(ready_ && batch_capacity_ && !soa_ && !cpu_q8k_,"SwiGLU checker mode");swiglu_batch_=value;
+    }
     uint64_t uploaded() const { return uploaded_; }
     uint64_t hits() const { return hits_; }
     uint64_t workspace() const { return workspace_; }
@@ -239,6 +250,6 @@ public:
         require(ready_,"unready resident probe");return {gate_,up_,hidden_};
     }
     // Caller MUST drain stream before reset/arena clear, including partial-load failure.
-    void reset() noexcept { ready_=false;batch_capacity_=batch_count_=0;batch_x_=batch_y_=nullptr;batch_input_.clear();batch_output_.clear();matrices_.clear();std::vector<std::byte>().swap(staging_); gate_ = up_ = hidden_ = nullptr; quant_ = nullptr; soa_=false;soa_quant_=nullptr;soa_scale_=nullptr;soa_tables_=nullptr; cpu_q8k_ = false; uploaded_ = hits_ = workspace_ = 0; }
+    void reset() noexcept { ready_=false;batch_capacity_=batch_count_=0;batch_x_=batch_y_=nullptr;batch_input_.clear();batch_output_.clear();matrices_.clear();std::vector<std::byte>().swap(staging_); gate_ = up_ = hidden_ = nullptr; quant_ = nullptr; soa_=false;swiglu_batch_=false;soa_quant_=nullptr;soa_scale_=nullptr;soa_tables_=nullptr; cpu_q8k_ = false; uploaded_ = hits_ = workspace_ = 0; }
 };
 } // namespace strata::wiring

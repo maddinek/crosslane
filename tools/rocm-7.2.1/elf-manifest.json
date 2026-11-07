@@ -1,0 +1,68 @@
+[
+  {
+    "path": "opt/rocm-7.2.1/lib/libamd_comgr.so.3.0.0",
+    "bytes": 162856456,
+    "sha256": "86568e08d2a8c2c6a56e25829e24886f59282ff0f92a8d8287c847d6b179750f",
+    "dynamic": [
+      {
+        "tag": "DT_SONAME",
+        "value": "libamd_comgr.so.3"
+      }
+    ]
+  },
+  {
+    "path": "opt/rocm-7.2.1/lib/libamdhip64.so.7.2.70201",
+    "bytes": 26673784,
+    "sha256": "1fca42f31a65697da41d9b840772c1862f09ce651bc8fc7566fc469b350a4538",
+    "dynamic": [
+      {
+        "tag": "DT_SONAME",
+        "value": "libamdhip64.so.7"
+      }
+    ]
+  },
+  {
+    "path": "opt/rocm-7.2.1/lib/libhiprtc-builtins.so.7.2.70201",
+    "bytes": 604880,
+    "sha256": "de9755c338c0ef52ff3e508a285124aa7908edf9b4c0611353796dc33e0955a4",
+    "dynamic": [
+      {
+        "tag": "DT_SONAME",
+        "value": "libhiprtc-builtins.so.7"
+      }
+    ]
+  },
+  {
+    "path": "opt/rocm-7.2.1/lib/libhiprtc.so.7.2.70201",
+    "bytes": 848984,
+    "sha256": "0273c379d3bd5762e03496f368786d75e2360bf15fc88532781df1e3f2344b26",
+    "dynamic": [
+      {
+        "tag": "DT_SONAME",
+        "value": "libhiprtc.so.7"
+      }
+    ]
+  },
+  {
+    "path": "opt/rocm-7.2.1/lib/libhsa-runtime64.so.1.18.70201",
+    "bytes": 4206600,
+    "sha256": "eb76ad7cc676364538f26c6f386c79d39c215422ccc87873205a85bdc883c3d1",
+    "dynamic": [
+      {
+        "tag": "DT_SONAME",
+        "value": "libhsa-runtime64.so.1"
+      }
+    ]
+  },
+  {
+    "path": "opt/rocm-7.2.1/lib/librocprofiler-register.so.0.6.0",
+    "bytes": 944840,
+    "sha256": "91327c010a72dc341b6e9f76109b7c16de33a36bbe5d8037508c9c49e89646fb",
+    "dynamic": [
+      {
+        "tag": "DT_SONAME",
+        "value": "librocprofiler-register.so.0"
+      }
+    ]
+  }
+]

@@ -61,7 +61,8 @@ def test_opt_in_config_and_real_bank(tmp_path,candidate):
 
 
 def test_default_config_and_freeze_opt_in(tmp_path):
-    ns={};exec(compile((HERE/'warm_config.py').read_text(),'warm_config.py','exec'),ns)
+    import runpy
+    ns=runpy.run_path(str(HERE/'warm_config.py'))
     default=ns['config']('/profile',True)
     assert 'warm_sycl_experts' not in default
     assert ns['config']('/profile',True,sycl_experts='mmvq-soa-v1')==default+'warm_sycl_experts=mmvq-soa-v1\n'

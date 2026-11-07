@@ -48,7 +48,8 @@ def test_changed_sign_word_fails_proof(tmp_path):
 
 
 def test_packed_strip_frozen_with_all_a7_flags():
-    ns={};exec(compile((HERE/'warm_config.py').read_text(),'warm_config.py','exec'),ns)
+    import runpy
+    ns=runpy.run_path(str(HERE/'warm_config.py'))
     cfg=ns['config']
     assert all(k not in cfg('/p',True) for k in ('warm_dense_owner','warm_hip_schedule','warm_kernel_timing','warm_sycl_experts'))
     value=cfg('/p',True,dense_owner='hip-v1',hip_schedule='queued-v1',kernel_timing=True,sycl_experts='packed-strip-v1')

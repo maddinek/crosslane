@@ -31,6 +31,9 @@ struct Config {
     std::string warm_hip_schedule = "baseline-v1"; // queued-v1: same kernels/order, fewer host waits
     std::string warm_expert_issue = "off"; // early-v1: CPU/B65 overlap same-stream shared FFN
     uint32_t warm_expert_timeline_limit = 0; // first N absolute positions/request, diagnostic only
+    std::string warm_hip_swiglu = "off"; // batch-v1: one elementwise launch per layer batch
+    std::string warm_engram_priority = "off"; // first-v1: enqueue first owned Engram layer before later layers
+    uint32_t warm_engram_trace_limit = 0; // bounded absolute positions/request; no clocks when zero
     std::string warm_engram = "off"; // read-ahead-v1: same-token host rows, HIP cut0 only
     bool warm_kernel_timing = false; // bounded launch spans; read only after dense-end wait
     std::string warm_hip_fuse = "off"; // small-v1, attention-v1, all-v1; native qualification required
@@ -84,6 +87,9 @@ struct Config {
             else if (k == "warm_experts") { require(v=="0"||v=="1","warm_experts must be 0 or 1"); c.warm_experts=v=="1"; }
             else if (k == "warm_packed_gu") { require(v=="0"||v=="1","warm_packed_gu must be 0 or 1"); c.warm_packed_gu=v=="1"; }
             else if (k == "warm_dense_owner") c.warm_dense_owner=v;
+            else if (k == "warm_hip_swiglu") c.warm_hip_swiglu=v;
+            else if (k == "warm_engram_priority") c.warm_engram_priority=v;
+            else if (k == "warm_engram_trace_limit") {auto n=std::stoull(v);require(std::to_string(n)==v&&n<=2000,"Engram trace bound");c.warm_engram_trace_limit=uint32_t(n);}
             else if (k == "warm_engram") c.warm_engram=v;
             else if (k == "warm_hip_experts") c.warm_hip_experts=v;
             else if (k == "warm_expert_issue") c.warm_expert_issue=v;
@@ -137,6 +143,9 @@ struct Config {
                 c.warm_hip_schedule=="queued-v1" && c.hip_expert_math=="per32-v1" && c.warm_hip_dense=="off" && c.dump_s.empty()),
                 "HIP layer batching requires warm experts, queued-v1, per32 math, no graphs or substep dumps");
         require(c.warm_engram=="off" || (c.warm_engram=="read-ahead-v1" && c.warm_experts && c.warm_dense_owner=="hip-v1"),"Engram read-ahead requires warm HIP dense ownership");
+        require(c.warm_hip_swiglu=="off" || (c.warm_hip_swiglu=="batch-v1" && c.warm_hip_experts=="layer-batch-v1"),"batch SwiGLU requires AoS layer batching");
+        require(c.warm_engram_priority=="off" || c.warm_engram_priority=="first-v1","unknown Engram priority");
+        require((c.warm_engram_priority=="off" && !c.warm_engram_trace_limit) || c.warm_engram=="read-ahead-v1","Engram scheduling requires read-ahead");
         require(!c.warm_kernel_timing || c.warm_measure,"kernel timing requires warm measurement");
         require(c.warm_hip_gemv=="off" || ((c.warm_hip_gemv=="q5-sums-v1" || c.warm_hip_gemv=="q5-sums-w4-v1") &&
                 c.warm_experts && c.warm_dense_owner=="hip-v1" && c.warm_hip_schedule=="queued-v1" && c.warm_hip_dense=="off" && c.dump_s.empty()),

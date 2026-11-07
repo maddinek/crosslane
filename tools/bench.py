@@ -19,6 +19,7 @@ from warm_config import config
 import host_profile
 
 A16 = ROOT/'presets/a16'
+A17 = ROOT/'presets/a17'
 # Execution settings from the frozen rebalanced a16 run, not new tuning defaults.
 A16_ENV = {
     'DS4_ENGRAM_CACHE_MB':'0', 'DS4_ENGRAM_THREADS':'2', 'DS4_SYNC':'1',
@@ -29,17 +30,18 @@ A16_ENV = {
 }
 
 
-def a16_inputs(pack):
+def a16_inputs(pack, preset='a16'):
     """Reconstruct the original uint32 LE profile from reviewable text only."""
     meta = dict(line.split(' ',1) for line in (pack/'ds4.txt').read_text().splitlines() if line)
-    recorded = json.loads((A16/'metadata.json').read_text())
+    directory = A17 if preset == 'a17' else A16
+    recorded = json.loads((directory/'metadata.json').read_text())
     dimensions = [int(meta['num_hidden_layers']), int(meta['n_routed_experts'])]
     if dimensions != recorded['dimensions']:
-        raise ValueError('a16 preset requires the recorded model dimensions; use the baseline preset for other models')
+        raise ValueError(preset+' preset requires the recorded model dimensions; use the baseline preset for other models')
     for name, digest in recorded['text_sha256'].items():
-        if sha(A16/name) != digest:
-            raise ValueError('a16 preset text changed: '+name)
-    lines = (A16/'profile-counts.txt').read_text().splitlines()
+        if sha(directory/name) != digest:
+            raise ValueError(preset+' preset text changed: '+name)
+    lines = (directory/'profile-counts.txt').read_text().splitlines()
     if lines[0] != 'CROSSLANE_COUNTS_V1 '+ ' '.join(map(str, dimensions)):
         raise ValueError('invalid a16 count header')
     counts = [list(map(int, line.split())) for line in lines[1:]]
@@ -48,7 +50,21 @@ def a16_inputs(pack):
     data = struct.pack('<'+'I'*(dimensions[0]*dimensions[1]), *(n for row in counts for n in row))
     if hashlib.sha256(data).hexdigest() != recorded['profile_sha256']:
         raise ValueError('reconstructed a16 profile differs from the measurement')
-    return data, (A16/'placement.txt').read_bytes()
+    return data, (directory/'placement.txt').read_bytes()
+
+
+def rocm_runtime(directory):
+    """Verify the six measured userspace ELFs and their SONAME links."""
+    manifest = json.loads((ROOT/'tools/rocm-7.2.1/elf-manifest.json').read_text())
+    for row in manifest:
+        name = Path(row['path']).name
+        path = directory/name
+        soname = next(t['value'] for t in row['dynamic'] if t['tag'] == 'DT_SONAME')
+        if path.stat().st_size != row['bytes'] or sha(path) != row['sha256']:
+            raise ValueError('ROCm 7.2.1 library differs: '+name)
+        if (directory/soname).resolve() != path.resolve():
+            raise ValueError('ROCm SONAME link differs: '+soname)
+    return directory
 
 
 def sha(path):
@@ -107,8 +123,10 @@ def parse_stream(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--preset', choices=['baseline', 'a16'], default='baseline',
-                   help='baseline preserves the original uniform/packed-strip setup; a16 uses the frozen measured placement and runtime')
+    p.add_argument('--preset', choices=['baseline', 'a16', 'a17'], default='baseline',
+                   help='a16/a17 bind measured modes and placement; a17 includes the VRAM step and requires staged ROCm 7.2.1')
+    p.add_argument('--rocm-runtime', type=Path,
+                   help='verified ROCm 7.2.1 folder; a17 defaults to build/rocm-7.2.1')
     p.add_argument('--pack', type=Path, required=True)
     p.add_argument('--package', type=Path, default=ROOT/'build/package')
     p.add_argument('--upstream', type=Path, default=ROOT/'build/upstream/strata')
@@ -118,11 +136,17 @@ def main():
     p.add_argument('--sycl-experts', choices=['serial-v1', 'grouped-v1', 'packed-strip-v1', 'mmvq-soa-v1', 'mmvq-soa-v2'])
     for key, default in [('sycl-cap',28500000000), ('hip-cap',30450647040), ('sycl-fixed',3*2**30),
                          ('hip-fixed',1529365504), ('store-bytes',110000000000), ('cpu-threads',16), ('store-threads',32)]:
+        if key in ('sycl-fixed', 'hip-fixed'): default = None
         p.add_argument('--'+key, type=int, default=default)
     a = p.parse_args()
-    if a.preset == 'a16' and (a.profile or a.placement or a.sycl_experts not in (None, 'mmvq-soa-v2')):
-        p.error('a16 binds its profile, placement and mmvq-soa-v2 kernel; use baseline for custom inputs')
-    a.sycl_experts = a.sycl_experts or ('mmvq-soa-v2' if a.preset == 'a16' else 'packed-strip-v1')
+    reference_preset = a.preset in ('a16', 'a17')
+    if reference_preset and (a.profile or a.placement or a.sycl_experts not in (None, 'mmvq-soa-v2')):
+        p.error(a.preset+' binds its profile, placement and mmvq-soa-v2 kernel; use baseline for custom inputs')
+    a.sycl_experts = a.sycl_experts or ('mmvq-soa-v2' if reference_preset else 'packed-strip-v1')
+    if a.sycl_fixed is None: a.sycl_fixed = (3*2**30)-(512<<20) if a.preset == 'a17' else 3*2**30
+    if a.hip_fixed is None: a.hip_fixed = 1529365504-(512<<20) if a.preset == 'a17' else 1529365504
+    runtime = a.rocm_runtime or (ROOT/'build/rocm-7.2.1' if a.preset == 'a17' else None)
+    if runtime: runtime = rocm_runtime(runtime.resolve())
     for name in ('pack', 'package', 'upstream', 'out'):
         setattr(a, name, getattr(a, name).resolve())
     if any(getattr(a, k) <= 0 for k in ('sycl_cap','hip_cap','sycl_fixed','hip_fixed','store_bytes','cpu_threads','store_threads')):
@@ -134,7 +158,7 @@ def main():
     if ids != prompt['ids'] or len(ids) != 325:
         raise ValueError('pack tokenizer does not match the canonical prompt; refusing benchmark')
     # Validate the reference text before creating output or starting native work.
-    reference = a16_inputs(a.pack) if a.preset == 'a16' else None
+    reference = a16_inputs(a.pack, a.preset) if reference_preset else None
     a.out.mkdir(parents=True)
     if reference:
         (a.out/'profile.bin').write_bytes(reference[0])
@@ -147,6 +171,8 @@ def main():
     profile = a.out/'profile.bin'
     modes = dict(hip_schedule='queued-v1', hip_experts='layer-batch-v1',
                  engram='read-ahead-v1', expert_issue='early-v1') if reference else {}
+    if a.preset == 'a17':
+        modes.update(hip_swiglu='batch-v1', hip_fuse='small-v1', engram_priority='first-v1')
     cfg = config(profile, True, dense_owner='hip-v1', sycl_attention='subgroup32-v1', sycl_experts=a.sycl_experts, **modes)
     cfg = cfg.replace('cpu_threads=16\n',f'cpu_threads={a.cpu_threads}\n').replace('warm_sycl_fixed='+str(3*2**30), 'warm_sycl_fixed='+str(a.sycl_fixed)).replace('warm_hip_fixed=1529365504',f'warm_hip_fixed={a.hip_fixed}')
     if reference or a.placement:
@@ -164,6 +190,8 @@ def main():
     if reference:
         env.update(A16_ENV)
         env['LD_LIBRARY_PATH'] = str(a.package/'runtime')+':'+str(a.package)
+    if runtime:
+        env['LD_LIBRARY_PATH'] = str(runtime)+':'+env['LD_LIBRARY_PATH']
     command = [str(a.package/'strata-warm-run'), '--pack',str(a.pack),'--ctx','12288','--cut','0','--eligible-cuts','0',
         '--stage-config',str(a.out/'warm.conf'),'--profile',str(profile),'--requests',str(a.out/'requests.txt'),
         '--chosen-plan',str(a.out/'chosen-plan.json'),'--sycl',str(a.package/'libstrata-stage-sycl-model.so'),
@@ -171,7 +199,8 @@ def main():
     for key in ('sycl_cap','hip_cap','sycl_fixed','hip_fixed'):command += ['--'+key.replace('_','-'),str(getattr(a,key))]
     if reference or a.placement: command += ['--placement', str(a.out/'placement.txt')]
     (a.out/'command.json').write_text(json.dumps({'argv':command, 'environment':{k:v for k,v in env.items() if k.startswith(('DS4_', 'AIOPT_ENGRAM_')) or k in ('LD_LIBRARY_PATH','HIP_VISIBLE_DEVICES','ROCR_VISIBLE_DEVICES','ONEAPI_DEVICE_SELECTOR')},
-        'preset':a.preset, 'profile_kind':'a16r-text-counts' if reference else 'provided' if a.profile else 'uniform',
+        'preset':a.preset, 'profile_kind':('a17-text-counts' if a.preset == 'a17' else 'a16r-text-counts') if reference else 'provided' if a.profile else 'uniform',
+        'rocm_runtime':str(runtime) if runtime else None,
         'placement_sha256':sha(a.out/'placement.txt') if reference or a.placement else None,
         'package_manifest_sha256':sha(a.package/'manifest.json'),
         'pack_metadata_sha256':{n:sha(a.pack/n) for n in ('ds4.txt','tensors.txt','engram.bin')},

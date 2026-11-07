@@ -1,41 +1,47 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 406" width="760" role="img" aria-labelledby="t d" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
-<title id="t">Decode speed on one machine, from 9.89 to 25.57 tokens per second</title>
-<desc id="d">Median tokens per second at each step on exact kernels, against a goal of 30. All values are in the table in README.md.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 462" width="760" role="img" aria-labelledby="t d" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+<title id="t">Decode speed on one machine, from 9.89 to 26.27 tokens per second</title>
+<desc id="d">Thirteen recorded setups on the same model and machine, using exact kernels without speculation. Earlier rows are medians of three answers at 8,192 tokens; the final a17 VRAM-rebalanced ROCm 7.2.1 row is the median of ten answers at 11,900 tokens, range 25.93 to 26.42. Placement and answer streams differ. Goal 30 remains unreached. Values are in README.md.</desc>
 <style>.bg{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.bar{fill:#2a78d6}.grid{stroke:#e4e3df}.goal{stroke:#52514e}@media (prefers-color-scheme:dark){.bg{fill:#1a1a19}.t1{fill:#f0efec}.t2{fill:#c3c2b7}.bar{fill:#3987e5}.grid{stroke:#3a3a37}.goal{stroke:#c3c2b7}}</style>
-<rect class="bg" width="760" height="406" rx="8"/>
+<rect class="bg" width="760" height="462" rx="8"/>
 <text class="t1" x="20" y="28" font-size="16" font-weight="600">Decode speed, tokens per second</text>
-<text class="t2" x="20" y="47" font-size="12">Median of 3 answers, realistic coding prompt, same model file, no speculation</text>
-<line class="grid" x1="232.0" x2="232.0" y1="60" y2="372"/>
-<text class="t2" x="232.0" y="388" font-size="11" text-anchor="middle">0</text>
-<line class="grid" x1="384.7" x2="384.7" y1="60" y2="372"/>
-<text class="t2" x="384.7" y="388" font-size="11" text-anchor="middle">10</text>
-<line class="grid" x1="537.3" x2="537.3" y1="60" y2="372"/>
-<text class="t2" x="537.3" y="388" font-size="11" text-anchor="middle">20</text>
-<line class="goal" stroke-dasharray="4 4" x1="690.0" x2="690.0" y1="60" y2="372"/>
-<text class="t2" x="690.0" y="388" font-size="11" text-anchor="middle">30 goal</text>
-<text class="t1" x="222" y="77" font-size="12" text-anchor="end" font-weight="600">Stock Strata (R9700 + RAM)</text>
-<path class="bar" d="M232 64h147.0a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-147.0z"><title>Stock Strata (R9700 + RAM): 9.89 tok/s</title></path>
+<text class="t2" x="20" y="47" font-size="12">Median of 3 answers; final row 10 at a longer cap. Same model, no speculation.</text>
+<line class="grid" x1="232.0" x2="232.0" y1="60" y2="428"/>
+<text class="t2" x="232.0" y="444" font-size="11" text-anchor="middle">0</text>
+<line class="grid" x1="384.7" x2="384.7" y1="60" y2="428"/>
+<text class="t2" x="384.7" y="444" font-size="11" text-anchor="middle">10</text>
+<line class="grid" x1="537.3" x2="537.3" y1="60" y2="428"/>
+<text class="t2" x="537.3" y="444" font-size="11" text-anchor="middle">20</text>
+<line class="goal" x1="690.0" x2="690.0" y1="60" y2="428" stroke-dasharray="4 4"/>
+<text class="t2" x="690.0" y="444" font-size="11" text-anchor="middle">30 goal</text>
+<text class="t1" x="222" y="77" font-size="12" text-anchor="end">Stock Strata (R9700 + RAM)</text>
+<rect class="bar" x="232" y="64" width="151.0" height="18" rx="4"><title>Stock Strata (R9700 + RAM): 9.89 tok/s</title></rect>
 <text class="t1" x="389.0" y="77" font-size="12" font-weight="600">9.89</text>
-<text class="t2" x="222" y="105" font-size="12" text-anchor="end">First fork run, both GPUs + RAM</text>
-<path class="bar" d="M232 92h152.9a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-152.9z"><title>First fork run, both GPUs + RAM: 10.28 tok/s</title></path>
-<text class="t2" x="222" y="133" font-size="12" text-anchor="end">Faster B65 attention</text>
-<path class="bar" d="M232 120h182.6a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-182.6z"><title>Faster B65 attention: 12.22 tok/s</title></path>
-<text class="t2" x="222" y="161" font-size="12" text-anchor="end">B65 kernels + rebalance</text>
-<path class="bar" d="M232 148h193.9a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-193.9z"><title>B65 kernels + rebalance: 12.96 tok/s</title></path>
-<text class="t2" x="222" y="189" font-size="12" text-anchor="end">All dense on the R9700</text>
-<path class="bar" d="M232 176h216.0a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-216.0z"><title>All dense on the R9700: 14.41 tok/s</title></path>
-<text class="t2" x="222" y="217" font-size="12" text-anchor="end">Two rebalance rounds</text>
-<path class="bar" d="M232 204h238.0a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-238.0z"><title>Two rebalance rounds: 15.85 tok/s</title></path>
-<text class="t2" x="222" y="245" font-size="12" text-anchor="end">Queued R9700 schedule</text>
-<path class="bar" d="M232 232h256.1a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-256.1z"><title>Queued R9700 schedule: 17.04 tok/s</title></path>
-<text class="t2" x="222" y="273" font-size="12" text-anchor="end">Exact B65 SoA kernel</text>
-<path class="bar" d="M232 260h271.4a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-271.4z"><title>Exact B65 SoA kernel: 18.04 tok/s</title></path>
-<text class="t1" x="222" y="301" font-size="12" text-anchor="end" font-weight="600">R9700 expert batching</text>
-<path class="bar" d="M232 288h320.7a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-320.7z"><title>R9700 expert batching: 21.27 tok/s</title></path>
+<text class="t1" x="222" y="105" font-size="12" text-anchor="end">First fork run, both GPUs + RAM</text>
+<rect class="bar" x="232" y="92" width="156.9" height="18" rx="4"><title>First fork run, both GPUs + RAM: 10.28 tok/s</title></rect>
+<text class="t1" x="222" y="133" font-size="12" text-anchor="end">Faster B65 attention</text>
+<rect class="bar" x="232" y="120" width="186.6" height="18" rx="4"><title>Faster B65 attention: 12.22 tok/s</title></rect>
+<text class="t1" x="222" y="161" font-size="12" text-anchor="end">B65 kernels + rebalance</text>
+<rect class="bar" x="232" y="148" width="197.9" height="18" rx="4"><title>B65 kernels + rebalance: 12.96 tok/s</title></rect>
+<text class="t1" x="222" y="189" font-size="12" text-anchor="end">All dense on the R9700</text>
+<rect class="bar" x="232" y="176" width="220.0" height="18" rx="4"><title>All dense on the R9700: 14.41 tok/s</title></rect>
+<text class="t1" x="222" y="217" font-size="12" text-anchor="end">Two rebalance rounds</text>
+<rect class="bar" x="232" y="204" width="242.0" height="18" rx="4"><title>Two rebalance rounds: 15.85 tok/s</title></rect>
+<text class="t1" x="222" y="245" font-size="12" text-anchor="end">Queued R9700 schedule</text>
+<rect class="bar" x="232" y="232" width="260.1" height="18" rx="4"><title>Queued R9700 schedule: 17.04 tok/s</title></rect>
+<text class="t1" x="222" y="273" font-size="12" text-anchor="end">Exact B65 SoA kernel</text>
+<rect class="bar" x="232" y="260" width="275.4" height="18" rx="4"><title>Exact B65 SoA kernel: 18.04 tok/s</title></rect>
+<text class="t1" x="222" y="301" font-size="12" text-anchor="end">R9700 expert batching</text>
+<rect class="bar" x="232" y="288" width="324.7" height="18" rx="4"><title>R9700 expert batching: 21.27 tok/s</title></rect>
 <text class="t1" x="562.7" y="301" font-size="12" font-weight="600">21.27</text>
-<text class="t2" x="222" y="329" font-size="12" text-anchor="end">Parallel Engram reads</text>
-<path class="bar" d="M232 316h340.6a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-340.6z"><title>Parallel Engram reads: 22.57 tok/s</title></path>
-<text class="t1" x="222" y="357" font-size="12" text-anchor="end" font-weight="600">Faster combine, early start</text>
-<path class="bar" d="M232 344h386.4a4 4 0 0 1 4 4v10a4 4 0 0 1 -4 4h-386.4z"><title>Faster combine, early start: 25.57 tok/s</title></path>
+<text class="t1" x="222" y="329" font-size="12" text-anchor="end">Parallel Engram reads</text>
+<rect class="bar" x="232" y="316" width="344.6" height="18" rx="4"><title>Parallel Engram reads: 22.57 tok/s</title></rect>
+<text class="t1" x="222" y="357" font-size="12" text-anchor="end">Faster combine, early start</text>
+<rect class="bar" x="232" y="344" width="390.4" height="18" rx="4"><title>Faster combine, early start: 25.57 tok/s</title></rect>
 <text class="t1" x="628.4" y="357" font-size="12" font-weight="600">25.57</text>
+<text class="t1" x="222" y="385" font-size="12" text-anchor="end">a17 + VRAM + rebalance</text>
+<rect class="bar" x="232" y="372" width="396.9" height="18" rx="4"><title>a17 + VRAM + rebalance: 26.00 tok/s</title></rect>
+<text class="t1" x="634.9" y="385" font-size="12" font-weight="600">26.00</text>
+<text class="t1" x="222" y="413" font-size="12" text-anchor="end">a17 + VRAM, ROCm 7.2.1</text>
+<rect class="bar" x="232" y="400" width="401.1" height="18" rx="4"><title>a17 + VRAM, ROCm 7.2.1: 26.27 tok/s</title></rect>
+<text class="t1" x="639.1" y="413" font-size="12" font-weight="600">26.27</text>
 </svg>

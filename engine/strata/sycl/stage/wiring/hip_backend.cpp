@@ -399,7 +399,7 @@ class HipStage final : public stage::Backend
         cpu_ = make_cpu_lane(*ws_, first, end, cfg_.cpu_threads, cfg_.cpu_dispatch, cfg_.cpu_timing);
         if (residency_.workspace) {
             resident_device_start_ = arena_->bytes;
-            residents_.load(*ws_, residency_, *arena_, s_, cfg_.warm_hip_experts!="serial-v1",cfg_.warm_hip_experts=="soa-v2");
+            residents_.load(*ws_, residency_, *arena_, s_, cfg_.warm_hip_experts!="serial-v1",cfg_.warm_hip_experts=="soa-v2",cfg_.warm_hip_swiglu=="batch-v1");
 #ifdef STRATA_FORK_WARM
             if(cfg_.warm_experts)warm_register(this,true);
 #endif
@@ -791,7 +791,7 @@ class HipStage final : public stage::Backend
 
 public:
     HipStage(uint32_t device, Config c)
-        : cfg_(std::move(c)), ws_(open_pack(cfg_.pack, {cfg_.q5k_fma, cfg_.cpu_timing})), g_(ws_->meta()),
+        : cfg_(std::move(c)), ws_(open_pack(cfg_.pack, {cfg_.q5k_fma, cfg_.cpu_timing, cfg_.warm_engram_priority=="first-v1", cfg_.warm_engram_trace_limit})), g_(ws_->meta()),
           topo_(topology(g_, cfg_.max_context)), dev_(int(device)) {
         CK(hipSetDevice(dev_));
         CK(hipStreamCreateWithFlags(&s_, hipStreamNonBlocking));
@@ -900,12 +900,19 @@ public:
         if (cfg_.warm_engram=="read-ahead-v1" && !engram_reads_ && g_.eg_nlayers) {
             engram_reads_=std::make_unique<EngramReadAhead>(size_t(g_.eg_nlayers),size_t(g_.eg_cols()),
                 size_t(g_.eg_cols())*size_t(g_.eg_hd+g_.eg_hd/32),
-                [this](int li,std::span<const uint64_t> ids,std::span<std::byte> dst){ws_->engram_rows(li,ids,dst);});
+                [this](int li,std::span<const uint64_t> ids,std::span<std::byte> dst,const std::function<void()>& queued){ws_->engram_rows_scheduled(li,ids,dst,queued);});
         }
         EngramReadAhead::TokenGuard engram_guard{engram_reads_.get()};
         require(!cancel.load(std::memory_order_acquire), "request cancelled");
-        if (engram_reads_) for (const auto& l : L_) if (l.role.eg >= 0)
-            engram_reads_->issue(l.role.eg,engram_slice(plan_,t,l.role.il));
+        if (engram_reads_) {
+            ws_->engram_token(t.request,t.position);bool first=true;
+            for (const auto& l : L_) if (l.role.eg >= 0) {
+                // L_ is in model order. First layer owns its complete row queue
+                // before later layer workers can compete for the shared pool.
+                engram_reads_->issue(l.role.eg,engram_slice(plan_,t,l.role.il),first && cfg_.warm_engram_priority=="first-v1");
+                first=false;
+            }
+        }
 #endif
         {
 #ifdef STRATA_FORK_WARM

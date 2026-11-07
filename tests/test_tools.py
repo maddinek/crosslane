@@ -36,13 +36,13 @@ def test_native_stream_warmup_excluded_and_bad_records_rejected(tmp_path):
         with pytest.raises(ValueError):m.parse_stream(path)
 
 
-@pytest.mark.parametrize('preset',['baseline','a16'])
+@pytest.mark.parametrize('preset',['baseline','a16','a17'])
 def test_benchmark_entrypoint_raw_answers_and_summary(tmp_path,preset):
     pack=tmp_path/'pack';pack.mkdir();tok=pack/'tokenizer';tok.mkdir()
     for name,data in {'vocab.json':{'x':0,'y':1,'z':2},'tokenizer.json':{'pre':'deepseek3','special_ids':{}},'token_type.json':[1,3,4]}.items():
         (tok/name).write_text(json.dumps(data))
     (tok/'merges.txt').write_text('')
-    layers,experts=(40,384) if preset=='a16' else (2,8)
+    layers,experts=(40,384) if preset in ('a16','a17') else (2,8)
     (pack/'ds4.txt').write_text(f'num_hidden_layers {layers}\nn_routed_experts {experts}\n')
     for name in ('tensors.txt','engram.bin'):(pack/name).write_bytes(b'fixture')
     upstream=tmp_path/'upstream';(upstream/'tools').mkdir(parents=True)
@@ -64,10 +64,14 @@ print('''+repr(stream())+''',end="")
     out=tmp_path/'out'
     env={**os.environ,'CROSSLANE_PYTHON':sys.executable,'CROSSLANE_HOST_PROFILE':str(profile),'CROSSLANE_LOCK':str(tmp_path/'gpu.lock')}
     cmd=['bash',str(ROOT/'tools/bench.sh'),'--pack',str(pack),'--package',str(package),'--upstream',str(upstream),'--out',str(out)]
-    if preset=='a16':
-        cmd+=['--preset','a16']
+    if preset in ('a16','a17'):
+        cmd+=['--preset',preset]
         env.update(DS4_OTHER_COMBINE_SIMD='0',DS4_CPU_AFFINITY='9999',DS4_WARM_HOST_PARTITION='1',
                    AIOPT_ENGRAM_QD='1',ROCR_VISIBLE_DEVICES='GPU-fixture',LD_LIBRARY_PATH='/ambient/unused')
+    if preset=='a17':
+        # Mock only validation of the large vendor ELFs; verify it separately below.
+        script="import sys;sys.path.insert(0,sys.argv.pop(1));import bench;bench.rocm_runtime=lambda p:p;bench.main()"
+        cmd=[sys.executable,'-c',script,str(ROOT/'tools'),*cmd[2:]]
     r=subprocess.run(cmd,env=env,capture_output=True,text=True)
     assert r.returncode==0,r.stdout+r.stderr
     assert 'median 8.000, min 4.000, max 16.000' in r.stdout
@@ -78,11 +82,11 @@ print('''+repr(stream())+''',end="")
     assert len((out/'profile.bin').read_bytes())==layers*experts*4
     record=json.loads((out/'command.json').read_text())
     assert record['preset']==preset
-    if preset=='a16':
+    if preset in ('a16','a17'):
         # Independent fixture extracted from the real freeze, not from bench.py.
-        expected=json.loads((ROOT/'tests/fixtures/a16r-runtime.json').read_text())
+        expected=json.loads((ROOT/('tests/fixtures/a17-runtime.json' if preset=='a17' else 'tests/fixtures/a16r-runtime.json')).read_text())
         def relocate(value):
-            for name,path in (('@OUT@',out),('@PACK@',pack),('@PACKAGE@',package)):
+            for name,path in (('@OUT@',out),('@PACK@',pack),('@PACKAGE@',package),('@ROCM@',ROOT/'build/rocm-7.2.1')):
                 value=value.replace(name,str(path))
             return value
         actual=json.loads((out/'chosen-plan.json').read_text())
@@ -93,7 +97,7 @@ print('''+repr(stream())+''',end="")
         assert record['environment']=={**engine_env,'ROCR_VISIBLE_DEVICES':'GPU-fixture'}
         for name,key in (('profile.bin','profile_sha256'),('placement.txt','placement_sha256'),('requests.txt','requests_sha256')):
             assert hashlib.sha256((out/name).read_bytes()).hexdigest()==expected[key]
-        assert record['profile_kind']=='a16r-text-counts'
+        assert record['profile_kind']==('a17-text-counts' if preset=='a17' else 'a16r-text-counts')
         assert record['placement_sha256']==expected['placement_sha256']
     else:
         cfg=module('bench').config(out/'profile.bin',True,dense_owner='hip-v1',sycl_attention='subgroup32-v1',sycl_experts='packed-strip-v1')

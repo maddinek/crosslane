@@ -30,9 +30,10 @@ int main(int argc,char**argv){try{
     if(argc==3){const std::string mode=argv[1];
         if(mode=="--experts-v2-identity"||mode=="--experts-v2-timing"||mode=="--experts-v2-profile")
             return hip_experts_check(argv[2],mode=="--experts-v2-timing",mode=="--experts-v2-profile");}
-    require(argc==3&&(std::string(argv[1])=="--identity"||std::string(argv[1])=="--timing"),
+    const bool swiglu=argc==3&&(std::string(argv[1])=="--swiglu-identity"||std::string(argv[1])=="--swiglu-timing");
+    require(argc==3&&(swiglu||std::string(argv[1])=="--identity"||std::string(argv[1])=="--timing"),
             "usage: strata-hip-batch-check --identity|--timing PACK");
-    const bool timing=std::string(argv[1])=="--timing";
+    const bool timing=std::string(argv[1])=="--timing"||std::string(argv[1])=="--swiglu-timing";
     for(const char* key:{"DS4_QUANT_NODEDUP","DS4_QUANT_SINGLE","DS4_IQ_Q8K"})
         require(!std::getenv(key),std::string("unset ")+key);
     auto ws=open_pack(argv[2]);const auto& g=ws->meta();
@@ -73,9 +74,12 @@ int main(int argc,char**argv){try{
             std::vector<int> slots(size_t(n),0);uint64_t event_ns=0;
             auto run=[&](bool batch,bool snapshot){
                 expected_hits+=uint64_t(n);
-                if(batch){clock.begin(stream);bank.enqueue_layer(layer,slots,x,g,stream);clock.end(stream);event_ns+=clock.elapsed_ns();
-                    if(snapshot){auto ptr=bank.probe_intermediates();for(size_t p=0;p<3;++p)
-                        ck(hipMemcpyAsync(got_stage.data()+p*size_t(n)*g.ff,ptr[p],size_t(n)*g.ff*4,hipMemcpyDeviceToHost,stream));ck(hipStreamSynchronize(stream));}
+                if(batch||swiglu){bank.set_swiglu_batch(swiglu&&batch);clock.begin(stream);bank.enqueue_layer(layer,slots,x,g,stream);clock.end(stream);event_ns+=clock.elapsed_ns();
+                    if(snapshot){
+                        if(!batch)std::copy(bank.layer_output().begin(),bank.layer_output().end(),old.begin());
+                        auto ptr=bank.probe_intermediates();auto* stage=batch?got_stage.data():ref_stage.data();
+                        for(size_t p=0;p<3;++p)ck(hipMemcpyAsync(stage+p*size_t(n)*g.ff,ptr[p],size_t(n)*g.ff*4,hipMemcpyDeviceToHost,stream));
+                        ck(hipStreamSynchronize(stream));}
                 }else for(int i=0;i<n;++i){clock.begin(stream);
                     ck(hipMemcpyAsync(dx,x.data(),x.size()*4,hipMemcpyHostToDevice,stream));bank.expert(layer,slots[size_t(i)],dx,dy,g,stream);
                     ck(hipMemcpyAsync(old.data()+size_t(i)*g.dim,dy,size_t(g.dim)*4,hipMemcpyDeviceToHost,stream));clock.end(stream);event_ns+=clock.elapsed_ns();
@@ -102,5 +106,5 @@ int main(int argc,char**argv){try{
         ck(hipGetLastError());ck(hipStreamSynchronize(stream));bank.reset();arena.clear();require(arena.bytes==0&&arena.release_ok,"checker teardown");++cases;
     }
     require(gg::launch_errors()==0,"upstream launch failure");
-    std::printf("HIP_BATCH_NATIVE PASS signatures=%zu selections=1..6 rounds=8\n",cases);return 0;
+    std::printf("%s PASS signatures=%zu selections=1..6 rounds=8\n",swiglu?"HIP_SWIGLU_NATIVE":"HIP_BATCH_NATIVE",cases);return 0;
 }catch(const std::exception&e){std::fprintf(stderr,"HIP_BATCH_NATIVE FAIL %s\n",e.what());return 1;}}

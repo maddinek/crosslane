@@ -28,9 +28,14 @@ def cost_modes(fields,cpu_layer_batch=False,cpu_affinity='',cpu_prefetch_rows=No
     if fields.get("warm_expert_issue","off")!="off":result["warm_expert_issue"]=fields["warm_expert_issue"]
     for key,default in (('warm_hip_fixed',HIP_FIXED_BYTES),('warm_sycl_fixed',SYCL_FIXED_BYTES)):
         if int(fields.get(key,default))!=default:result[key]=int(fields[key])
+    for key in ('warm_hip_swiglu','warm_engram_priority'):
+        if fields.get(key,'off')!='off':result[key]=fields[key]
     return result
 
-def config(profile,packed_gu=False,sycl_attention='scalar-v1',dense_owner='split-v1',hip_schedule='baseline-v1',kernel_timing=False,sycl_experts='serial-v1',hip_dense='off',hip_fuse='off',engram='off',hip_experts='serial-v1',hip_gemv='off',cpu_timing=False,expert_issue='off',expert_timeline_limit=0,warm_hip_fixed=HIP_FIXED_BYTES,warm_sycl_fixed=SYCL_FIXED_BYTES):
+def config(profile,packed_gu=False,sycl_attention='scalar-v1',dense_owner='split-v1',hip_schedule='baseline-v1',kernel_timing=False,sycl_experts='serial-v1',hip_dense='off',hip_fuse='off',engram='off',hip_experts='serial-v1',hip_gemv='off',cpu_timing=False,expert_issue='off',expert_timeline_limit=0,warm_hip_fixed=HIP_FIXED_BYTES,warm_sycl_fixed=SYCL_FIXED_BYTES,hip_swiglu="off",engram_priority="off",engram_trace_limit=0):
+    if hip_swiglu not in ('off','batch-v1') or (hip_swiglu!='off' and hip_experts!='layer-batch-v1'):raise ValueError('batch SwiGLU requires AoS layer batching')
+    if engram_priority not in ('off','first-v1') or type(engram_trace_limit) is not int or not 0<=engram_trace_limit<=2000:raise ValueError('invalid Engram scheduling')
+    if (engram_priority!='off' or engram_trace_limit) and engram!='read-ahead-v1':raise ValueError('Engram scheduling requires read-ahead')
     fixed_budgets(warm_hip_fixed,warm_sycl_fixed)
     if (warm_hip_fixed,warm_sycl_fixed)!=(HIP_FIXED_BYTES,SYCL_FIXED_BYTES) and dense_owner!='hip-v1':
         raise ValueError('reduced fixed budgets require HIP cut0 bank-only B65')
@@ -55,6 +60,9 @@ def config(profile,packed_gu=False,sycl_attention='scalar-v1',dense_owner='split
             ('warm_hip_experts='+hip_experts+'\n' if hip_experts!='serial-v1' else '')+
             ('warm_expert_issue='+expert_issue+'\n' if expert_issue!='off' else '')+
             ('warm_expert_timeline_limit='+str(expert_timeline_limit)+'\n' if expert_timeline_limit else '')+
+            ('warm_hip_swiglu='+hip_swiglu+'\n' if hip_swiglu!='off' else '')+
+            ('warm_engram_priority='+engram_priority+'\n' if engram_priority!='off' else '')+
+            ('warm_engram_trace_limit='+str(engram_trace_limit)+'\n' if engram_trace_limit else '')+
             ('warm_engram='+engram+'\n' if engram!='off' else '')+
             ('warm_hip_schedule='+hip_schedule+'\n' if hip_schedule!='baseline-v1' else '')+
             ('warm_kernel_timing=1\n' if kernel_timing else '')+

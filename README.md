@@ -1,12 +1,12 @@
 # crosslane
 
-**A 763-billion-parameter DeepSeek on one desktop, at 25.6 tokens per second, with an AMD GPU, an Intel GPU and system RAM computing each layer's experts concurrently.**
+**A 763-billion-parameter DeepSeek on one desktop, at 26.3 tokens per second, with an AMD GPU, an Intel GPU and system RAM computing each layer's experts concurrently.**
 
-[![Decode speed rose from 9.89 to 25.57 tokens per second over eleven steps, against a goal of 30](docs/progress.svg)](docs/RESULTS.md)
+[![Decode speed rose from 9.89 to 26.27 tokens per second over thirteen recorded setups, against a goal of 30](docs/progress.svg)](docs/RESULTS.md)
 
 | | |
 |---|---|
-| **Speed** | **26.27 tok/s** median over ten answers (25.93–26.42), generating real code. 25.57 tok/s with the code in this repo today |
+| **Speed** | **26.27 tok/s** median over ten answers (25.93–26.42), generating real code. a17 sources and the VRAM-rebalanced placement are in this repo |
 | **Against stock** | **2.66×** our recorded stock [Strata](https://github.com/Niko1221/Strata) run on the same machine and model file (9.89 tok/s, one GPU, 16 readers, a 51 GB store). A whole-system comparison, not a kernel A/B |
 | **How exact** | No speculation, no skipped experts, routing algorithm unchanged. Tested kernel and schedule modes are byte-identical at a fixed placement over 581 teacher-forced positions; placement changes alter results slightly (see below) |
 | **Does it write working code?** | **6 of 10 answers passed strict** with room up to 11,900 tokens, working code in 292–439 s. Includes prefill, excludes engine load |
@@ -19,7 +19,7 @@ crosslane is a research fork of Strata (pinned at `ffa80d73`, v0.2.10). Neither 
 
 > **If you run ROCm 7.1 and memory keeps growing, try 7.2.1.** On Fedora's `rocm-hip-7.1.1-3.fc44`, our fork's anonymous memory grew about 270 KB per generated token, and the run hit its guard after 59 minutes. Stock Strata also showed memory growth, at a different rate. Allocation stacks pointed at ROCm's profiling signals and timestamps. Running the same binaries on AMD's ROCm 7.2.1 libraries from a private folder, no install and no driver change, gave byte-identical output over 581 teacher-forced positions and flat memory across ten answers. See [the steps](docs/BUILD.md#rocm-721-without-installing-it).
 >
-> **Status: research code, tested on one machine.** The public sources are a16 (25.57 tok/s), run under our private safety guards. The a17 sources behind 26.27 tok/s and the 6-of-10 quality result aren't exported yet. The standalone build, pack and benchmark scripts have passed CPU tests but **haven't yet run end to end on GPUs**. Expect to read code.
+> **Status: research code, tested on one machine.** The public sources include a17, the VRAM-rebalanced placement and pinned ROCm 7.2.1 staging inputs behind 26.27 tok/s and the 6-of-10 quality result, measured under our private safety guards. The earlier a16 preset is retained. The standalone build, pack and benchmark scripts have passed CPU tests but **haven't yet run end to end on GPUs**. Expect to read code.
 
 ## How it works
 
@@ -38,7 +38,7 @@ flowchart LR
     J --> N[Next layer]
 ```
 
-Every device is doing real work, in a different role:
+Every device is doing real work, in a different role. The following allocation and service figures are the historical a16r measurement; a17 + VRAM adds expert capacity and rebalances again:
 
 | | R9700 | Arc Pro B65 | CPU + RAM |
 |---|---:|---:|---:|
@@ -53,7 +53,7 @@ The R9700 is faster per pick, so the rebalancer gives it the most-used experts, 
 What made the difference, in the order we found it:
 
 - **Three expert lanes per layer.** Each lane runs its picks at once, then they join in a fixed order, so the math doesn't depend on who finished first.
-- **Measured placement.** A rebalancer uses real per-lane costs from a real run and moves experts to bring the lanes' total time together. Rebalancing took 20.69 to 25.57 tok/s in the last step; placement also changes the answers, so that's an unpaired comparison of medians.
+- **Measured placement.** A rebalancer uses real per-lane costs from a real run and moves experts to bring the lanes' total time together. Rebalancing took 20.69 to 25.57 tok/s at the a16 step; placement also changes the answers, so that's an unpaired comparison of medians.
 - **New kernels for both vendors.** An exact-order structure-of-arrays dot-product kernel for IQ2_XXS, IQ2_XS and IQ1_M on the B65, per-layer expert batching on the R9700 (six experts in 227 µs instead of 649 µs).
 - **Dense on the faster card only**, with a queued schedule, so there's no dense-stage hand-off between GPUs. Expert inputs and outputs still transfer.
 - **Parallel Engram reads.** DeepSeek's memory lookup hits 24 rows per layer on disk. Parallel reads, read-ahead and a 128 MiB row cache cut a noisy 5–17 ms per token; the whole Engram-containing regions now total 1.74 ms, including other work in those layers.
@@ -134,7 +134,7 @@ The rules that kept it honest: raw data for every run, at least 3 repetitions wi
 
 ## Try it
 
-See [docs/BUILD.md](docs/BUILD.md): `tools/build.sh`, `tools/pack.py`, `tools/bench.sh`. You need ROCm (HIP) for the AMD card, oneAPI 2026.1 (SYCL/ESIMD) for the Intel card and the upstream Strata source at the pinned commit. `tools/bench.sh --preset a16` selects the frozen a16r settings and measured placement for this exact model and hardware (not yet run on GPUs from this repo); the default preset is a plain baseline and won't reproduce the numbers above. To measure your own placement, see `engine/strata/warm/make_costs.py` + `rebalance.py`.
+See [docs/BUILD.md](docs/BUILD.md): `tools/build.sh`, `tools/pack.py`, `tools/bench.sh`. You need ROCm (HIP) for the AMD card, oneAPI 2026.1 (SYCL/ESIMD) for the Intel card and the upstream Strata source at the pinned commit. `tools/bench.sh --preset a17` selects the a17 settings and VRAM-rebalanced placement for this exact model and hardware, with verified staged ROCm 7.2.1 libraries (not yet run on GPUs from this repo). `--preset a16` retains the earlier setup; the default preset is a plain baseline and won't reproduce the numbers above. To measure your own placement, see `engine/strata/warm/make_costs.py` + `rebalance.py`.
 
 ## Help wanted
 

@@ -6,6 +6,7 @@
 #pragma once
 #include "model_meta.hpp"
 #include <cstddef>
+#include <functional>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -63,6 +64,12 @@ public:
     // `cols` rows of eg_hd code bytes, then `cols` x (eg_hd/32) scale bytes. ids.size() == cols; an ID equal
     // to UINT64_MAX (image / zero row) writes zeros for that row and its scales. dst.size() == cols*(hd+hd/32).
     virtual void engram_rows(int eg_index, std::span<const uint64_t> ids, std::span<std::byte> dst) const = 0;
+    // Optional queue handshake: all row jobs are owned by the pool before return.
+    virtual void engram_rows_scheduled(int li, std::span<const uint64_t> ids, std::span<std::byte> dst,
+                                       const std::function<void()>& queued) const {
+        if(queued)queued();engram_rows(li,ids,dst);
+    }
+    virtual void engram_token(uint64_t, uint64_t) const {}
     // BF16 embedding row of `token` (embed.weight): a BF16 table as stored, or a Q5_K table decoded like
     // upstream gg::gg_row_to_bf16 (ds4_gg_cpu.cpp:266: ggml to_float, then u += 0x7fff + lsb). Other types
     // fail closed. parity/embed_check.cpp compares every row against upstream's own decode.
@@ -140,6 +147,8 @@ struct PackOptions {
     // decides the bits. Frozen per build by parity/embed_check.cpp (both variants are reported).
     bool q5k_fma = false;
     bool io_timing = false; // a11 opt-in logical pread counters, not physical SSD bytes
+    bool engram_priority = false;
+    uint32_t engram_trace_limit = 0;
 };
 std::unique_ptr<WeightSource> open_pack(const std::string& pack_dir, PackOptions = {});
 // ggml dequantize_row_q5_K for one row of k values (k % 256 == 0), 176-byte blocks; exposed for embed_check.
