@@ -33,7 +33,9 @@ The stock row used one GPU, 16 readers and about 89% store hits with about 53 MB
 | a15 | + parallel Engram reads (QD8, read-ahead; called Engram a3 privately), default placement | 18.22 | 18.84 | 18.31 | 18.31 | 1/3 |
 | a15r | + rebalance | 22.40 | 22.57 | 22.61 | 22.57 | 0/3 |
 | a16 | + AVX2 combine, early expert start, default placement (answers token-identical to a15) | 20.63 | 20.69 | 20.73 | 20.69 | 1/3 |
-| a16r | + rebalance | 25.47 | 25.57 | 25.65 | **25.57** | 0/3 |
+| a16r | + rebalance | 25.47 | 25.57 | 25.65 | 25.57 | 0/3 |
+| a17 | + batched SwiGLU, small fusion, Engram priority, default placement (token-identical to a16) | 20.47 | 21.38 | 20.70 | 20.70 | 1/3 |
+| a17 + VRAM | + 512 MiB less fixed reserve per GPU, rebalance (source not yet in this repo) | 26.13 | 26.00 | 25.40 | **26.00** | 1/3 |
 | a9r | MMVQ-style B65 kernel + rebalance: **failed the quality gate below, not adopted** | 18.19 | 17.05 | 18.53 | 18.19 | 0/3 |
 
 Strict = the generated module's own tests plus independent functional checks pass. With 3 sampled
@@ -55,6 +57,22 @@ disk reads (layers 1 and 14, 48 serial reads per token).
 
 Per expert selection in a real run (from per-layer lane service deltas): CPU ~0.29 ms, R9700
 ~0.12–0.13 ms, B65 ~0.32 ms. Joined expert time per token (a8r2): ~25 ms.
+
+## Quality at 11,900 tokens (a17 + VRAM)
+
+Frozen scorer, independent seeds, planned 10 answers, stopped after 7 by the memory guard (see the README's known bug). Scored as a diagnostic because the run didn't complete.
+
+| Answer | Tokens | Finish | tok/s | Strict at 11,900 | Working code | Strict at 8,192 |
+|---|---:|---|---:|---|---:|---|
+| r0 | 7,363 | end | 26.21 | pass | 295 s | pass |
+| r1 | 7,830 | end | 25.54 | pass | 321 s | pass |
+| r2 | 10,444 | end | 25.85 | pass | 418 s | cut off |
+| r3 | 8,677 | end | 26.09 | fail, own tests pass | — | cut off |
+| r4 | 5,519 | end | 26.16 | fail, own tests fail | — | fail |
+| r5 | 10,296 | end | 26.04 | pass | 409 s | cut off |
+| r6 | 11,900 | cap | 25.92 | no module | — | cut off |
+
+Strict 4/7 (Wilson 95% about 25–84%), 2/7 at 8,192. No reference arm.
 
 ## Where a token goes (a16r)
 
